@@ -1,8 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import {
-  Html5Qrcode,
-  Html5QrcodeSupportedFormats,
-} from "html5-qrcode";
+import Quagga from "@ericblade/quagga2";
 import { db } from "./db";
 import { downloadCSV, parseCSV } from "./csv";
 
@@ -48,17 +45,16 @@ export default function App() {
 
   // Scanner UI
   const [scanOpen, setScanOpen] = useState(false);
-  const [scannerExpanded, setScannerExpanded] = useState(false);
+  const [scannerExpanded, setScannerExpanded] = useState(true); // expanded by default (best for small ID cards)
 
-  // Camera flip
-  const [cameras, setCameras] = useState([]);
+  // Camera flip (deviceId list)
+  const [cameras, setCameras] = useState([]); // [{deviceId,label}]
   const [cameraIndex, setCameraIndex] = useState(0);
 
-  // html5-qrcode
-  const qrRefId = "reader";
-  const qrInstance = useRef(null);
-  const lastDecodedRef = useRef({ text: "", t: 0 });
-  const photoInputRef = useRef(null);
+  // Quagga refs
+  const quaggaActiveRef = useRef(false);
+  const lastDetectedRef = useRef({ code: "", t: 0 });
+  const viewportId = "quagga-viewport";
 
   const title = useMemo(
     () => (mode === "events" ? "Events" : "Distribution"),
@@ -77,7 +73,7 @@ export default function App() {
     setTimeout(() => setScreen("app"), 350);
   }
 
-  // Welcome: 3 seconds then fade out (also tap anywhere to dismiss)
+  // Welcome: 3 seconds then fade out (also tap anywhere)
   useEffect(() => {
     if (screen !== "welcome") return;
     setWelcomeStage("in");
@@ -99,7 +95,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen, mode]);
 
-  // Auto-submit exactly 7 digits in Events mode
+  // Auto-submit on exactly 7 digits in Events mode
   useEffect(() => {
     const v = scan.trim();
     if (mode === "events" && /^\d{7}$/.test(v)) {
@@ -124,7 +120,6 @@ export default function App() {
       };
     });
 
-    // Replace current mode data with imported rows
     await db.records.where({ mode }).delete();
 
     const toInsert = rows
@@ -200,7 +195,6 @@ export default function App() {
       return;
     }
 
-    // distribution: match ID or Name, mark first unreceived
     const v = value.trim().toLowerCase();
     const id = normalizeId(value);
     const matches = list.filter(
@@ -239,142 +233,155 @@ export default function App() {
     showBanner("Cleared all records.", "ok", 1.5);
   }
 
-  // ---- CAMERA / SCANNER ----
-  async function ensureCamerasLoaded() {
+  // -------- Quagga2 scanner --------
+  async function refreshCameras() {
     try {
-      const cams = await Html5Qrcode.getCameras();
-      setCameras(cams || []);
-      return cams || [];
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const vids = devices.filter((d) => d.kind === "videoinput");
+      setCameras(vids.map((d) => ({ deviceId: d.deviceId, label: d.label || "Camera" })));
+      return vids;
     } catch {
       setCameras([]);
       return [];
     }
   }
-function getScanConfig() {
-  return {
-    fps: 20,
-    // Wide + short box that always fits the viewfinder (better for small 1D Code 128)
-    qrbox: (vw, vh) => {
-      const width = Math.floor(vw * 0.96);
-      const height = Math.floor(Math.min(vh * 0.35, 140));
-      return { width, height };
-    },
-    formatsToSupport: [Html5QrcodeSupportedFormats.CODE_128],
-    showTorchButtonIfSupported: true,
-    showZoomSliderIfSupported: true,
-    defaultZoomValueIfSupported: 3.5,
-    experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-  };
-}
 
-
-  async function startScanner() {
+  function stopScanner() {
     try {
-      if (qrInstance.current) return;
-
-      const q = new Html5Qrcode(qrRefId);
-      qrInstance.current = q;
-
-      const cams = cameras.length ? cameras : await ensureCamerasLoaded();
-      const picked =
-        cams && cams.length ? cams[Math.min(cameraIndex, cams.length - 1)] : null;
-
-      await q.start(
-        picked?.id || { facingMode: "environment" },
-        getScanConfig(),
-        (decodedText) => {
-          const now = Date.now();
-          const last = lastDecodedRef.current;
-          if (decodedText === last.text && now - last.t < 1200) return;
-          lastDecodedRef.current = { text: decodedText, t: now };
-          handleSubmit(decodedText);
-        },
-        () => {}
-      );
-    } catch (e) {
-      showBanner("Camera scan not available. Use typing.", "bad", 2);
-      stopScanner();
-      setScanOpen(false);
-    }
-  }
-
-  async function stopScanner() {
-    try {
-      if (!qrInstance.current) return;
-      const q = qrInstance.current;
-      qrInstance.current = null;
-      await q.stop();
-      await q.clear();
+      if (quaggaActiveRef.current) {
+        Quagga.offDetected(onDetected);
+        Quagga.stop();
+      }
     } catch {
       // ignore
+    } finally {
+      quaggaActiveRef.current = false;
     }
   }
 
-  async function flipCamera() {
-    const cams = cameras.length ? cameras : await ensureCamerasLoaded();
-    if (!cams || cams.length <= 1) return;
+  function onDetected(result) {
+    const code = result?.codeResult?.code ? String(result.codeResult.code).trim() : "";
+    if (!code) return;
 
-    await stopScanner();
-    setCameraIndex((i) => (i + 1) % cams.length);
-    setTimeout(() => startScanner(), 80);
+    const now = Date.now();
+    const last = lastDetectedRef.current;
+    if (code === last.code && now - last.t < 1200) return;
+    lastDetectedRef.current = { code, t: now };
+
+    handleSubmit(code);
   }
 
-  async function toggleExpanded() {
-    await stopScanner();
-    setScannerExpanded((v) => !v);
-    setTimeout(() => startScanner(), 120);
+  async function startScanner() {
+    if (quaggaActiveRef.current) return;
+
+    if (!cameras.length) {
+      await refreshCameras();
+    }
+
+    const picked = cameras.length ? cameras[Math.min(cameraIndex, cameras.length - 1)] : null;
+
+    const target = document.getElementById(viewportId);
+    if (!target) return;
+
+    target.innerHTML = "";
+
+    const constraints = picked?.deviceId
+      ? { deviceId: { exact: picked.deviceId } }
+      : { facingMode: "environment" };
+
+    return new Promise((resolve, reject) => {
+      Quagga.init(
+        {
+          inputStream: {
+            type: "LiveStream",
+            target,
+            constraints: {
+              ...constraints,
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+              aspectRatio: { ideal: 1.777 },
+            },
+            area: {
+              top: "38%",
+              right: "6%",
+              left: "6%",
+              bottom: "38%",
+            },
+          },
+          locator: {
+            patchSize: "medium",
+            halfSample: true,
+          },
+          numOfWorkers: navigator.hardwareConcurrency ? Math.min(4, navigator.hardwareConcurrency) : 2,
+          frequency: 10,
+          decoder: {
+            readers: ["code_128_reader"],
+            multiple: false,
+          },
+          locate: true,
+        },
+        (err) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          Quagga.onDetected(onDetected);
+          Quagga.start();
+          quaggaActiveRef.current = true;
+          resolve();
+        }
+      );
+    });
   }
 
-  // Start/stop scanner when opened/closed
   useEffect(() => {
     if (!scanOpen) {
       stopScanner();
       return;
     }
-    if (scanOpen && cameras.length === 0) ensureCamerasLoaded();
-    startScanner();
+    (async () => {
+      try {
+        await startScanner();
+        await refreshCameras();
+      } catch (e) {
+        showBanner("Camera scan not available. Try the HTTPS (Vercel) link.", "bad", 2.2);
+        stopScanner();
+        setScanOpen(false);
+      }
+    })();
+
     return () => stopScanner();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanOpen]);
 
-  // Restart scanner if camera changes
   useEffect(() => {
     if (!scanOpen) return;
     (async () => {
-      await stopScanner();
-      setTimeout(() => startScanner(), 80);
+      stopScanner();
+      try {
+        await startScanner();
+      } catch {
+        showBanner("Couldn’t switch camera.", "bad", 1.6);
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraIndex]);
 
-  // Restart scanner if expanded mode changes (pixel layout changes)
   useEffect(() => {
     if (!scanOpen) return;
-    (async () => {
-      await stopScanner();
-      setTimeout(() => startScanner(), 120);
-    })();
+    const t = setTimeout(() => {
+      stopScanner();
+      startScanner().catch(() => {});
+    }, 120);
+    return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scannerExpanded]);
 
-  async function photoScanFile(file) {
-  if (!file) return;
-  try {
-    // Stop live scanner to avoid iOS camera conflicts
-    await stopScanner();
-
-    // Fresh instance for file scan
-    const q = new Html5Qrcode(qrRefId);
-    const result = await q.scanFile(file, false);
-    await q.clear();
-
-    handleSubmit(result);
-  } catch (e) {
-    showBanner("Couldn’t read photo. Try brighter light / closer crop.", "bad", 2.2);
+  function flipCamera() {
+    if (cameras.length <= 1) return;
+    setCameraIndex((i) => (i + 1) % cameras.length);
   }
-}
 
-// ---- UI ----
   if (screen === "welcome") {
     return (
       <div style={styles.page} onClick={dismissWelcome}>
@@ -409,9 +416,7 @@ function getScanConfig() {
           <div style={{ whiteSpace: "pre-line", textAlign: "center", fontWeight: 900, fontSize: 22 }}>
             {banner.text}
           </div>
-          <div style={{ marginTop: 12, opacity: 0.95, fontWeight: 800 }}>
-            Tap to dismiss
-          </div>
+          <div style={{ marginTop: 12, opacity: 0.95, fontWeight: 800 }}>Tap to dismiss</div>
         </div>
       )}
 
@@ -430,7 +435,7 @@ function getScanConfig() {
               </button>
               <button
                 style={styles.smallBtn}
-                onClick={toggleExpanded}
+                onClick={() => setScannerExpanded((v) => !v)}
                 title="Resize"
                 aria-label="Resize"
               >
@@ -446,7 +451,11 @@ function getScanConfig() {
               </button>
             </div>
           </div>
-          <div id={qrRefId} style={styles.readerBody} />
+
+          <div style={styles.readerBody}>
+            <div id={viewportId} style={styles.viewport} />
+            <div style={styles.aimGuide} />
+          </div>
         </div>
       )}
 
@@ -487,28 +496,15 @@ function getScanConfig() {
         </div>
 
         <div style={styles.row}>
-          <button style={styles.btnSecondary} onClick={() => {
+          <button
+            style={styles.btnSecondary}
+            onClick={() => {
               setScannerExpanded(true);
               setScanOpen((v) => !v);
-            }}>
+            }}
+          >
             {scanOpen ? "Hide Camera" : "Camera Scan"}
           </button>
-
-          <label style={styles.btnSecondary}>
-            Photo Scan
-            <input
-              ref={photoInputRef}
-              type="file"
-              accept="image/*"
-              capture="environment"
-              hidden
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                e.target.value = "";
-                if (f) photoScanFile(f);
-              }}
-            />
-          </label>
 
           <label style={styles.fileBtn}>
             Import CSV
@@ -554,9 +550,7 @@ function getScanConfig() {
                 <button
                   key={r.id}
                   style={styles.rowItem}
-                  onClick={() =>
-                    handleSubmit(mode === "events" ? r.studentId : r.studentId || r.name)
-                  }
+                  onClick={() => handleSubmit(mode === "events" ? r.studentId : r.studentId || r.name)}
                 >
                   <div style={{ fontWeight: 900 }}>{r.name || "(No name)"}</div>
                   <div style={{ opacity: 0.9, fontSize: 13 }}>
@@ -601,7 +595,7 @@ const styles = {
     border: "1px solid rgba(255,255,255,0.08)",
   },
   header: { display: "flex", alignItems: "center", gap: 12, marginBottom: 6 },
-  logo: { height: 55, width: 55, objectFit: "contain" },
+  logo: { height: 44, width: 44, objectFit: "contain" },
 
   welcomeLogoWrap: { display: "flex", justifyContent: "center", marginBottom: 12 },
   welcomeLogo: { height: 86, width: 86, objectFit: "contain" },
@@ -690,8 +684,8 @@ const styles = {
     position: "fixed",
     right: 12,
     bottom: 12,
-    width: 260,
-    height: 280,
+    width: 280,
+    height: 320,
     background: "#0b1220",
     border: "1px solid rgba(255,255,255,0.14)",
     borderRadius: 16,
@@ -699,14 +693,12 @@ const styles = {
     zIndex: 40,
     boxShadow: "0 12px 32px rgba(0,0,0,0.35)",
   },
-
-  // Expanded scanner for small ID cards
   bigScanner: {
     position: "fixed",
     left: 12,
     right: 12,
     bottom: 12,
-    height: "50vh",
+    height: "55vh",
     background: "#0b1220",
     border: "1px solid rgba(255,255,255,0.14)",
     borderRadius: 16,
@@ -714,7 +706,6 @@ const styles = {
     zIndex: 40,
     boxShadow: "0 12px 32px rgba(0,0,0,0.35)",
   },
-
   cornerHeader: {
     display: "flex",
     alignItems: "center",
@@ -722,8 +713,7 @@ const styles = {
     padding: "8px 10px",
     borderBottom: "1px solid rgba(255,255,255,0.08)",
   },
-
-    smallBtn: {
+  smallBtn: {
     border: "1px solid rgba(255,255,255,0.16)",
     background: "#111827",
     color: "#e5e7eb",
@@ -744,7 +734,24 @@ const styles = {
     borderRadius: 8,
   },
   readerBody: {
+    position: "relative",
+    width: "100%",
+    height: "calc(100% - 42px)",
+    background: "#000",
+  },
+  viewport: {
     width: "100%",
     height: "100%",
+  },
+  aimGuide: {
+    position: "absolute",
+    left: "6%",
+    right: "6%",
+    top: "38%",
+    bottom: "38%",
+    border: "2px solid rgba(34,197,94,0.7)",
+    borderRadius: 12,
+    pointerEvents: "none",
+    boxShadow: "0 0 0 9999px rgba(0,0,0,0.18) inset",
   },
 };

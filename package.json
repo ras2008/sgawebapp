@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@ericblade/quagga2": "^1.12.1",
     "dexie": "^3.2.4",
     "html5-qrcode": "^2.3.8",
     "papaparse": "^5.4.1",
