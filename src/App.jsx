@@ -8,14 +8,15 @@ function pad2(n) {
 }
 function nowStamp() {
   const d = new Date();
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(
+    d.getHours()
+  )}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 }
 function normalizeId(id) {
   const s = String(id ?? "").trim();
   if (/^\d{6}$/.test(s)) return "0" + s;
   return s;
 }
-
 function getGreeting() {
   const hour = new Date().getHours();
   if (hour < 12) return "Good morning ☀️";
@@ -31,38 +32,55 @@ function formatDateLong() {
   });
 }
 
-
 export default function App() {
   const [screen, setScreen] = useState("welcome"); // welcome | app
+  const [welcomeStage, setWelcomeStage] = useState("in"); // in | out
+
   const [mode, setMode] = useState("events"); // events | distribution
   const [records, setRecords] = useState([]);
   const [scan, setScan] = useState("");
+
   const [banner, setBanner] = useState(null); // {text, type}
   const bannerTimer = useRef(null);
 
-  // Welcome auto-transition + fade
-  const [welcomeStage, setWelcomeStage] = useState("in"); // in | out
-
-  // Camera scanner (corner, continuous)
+  // Corner camera scanner
   const [scanOpen, setScanOpen] = useState(false);
   const qrRefId = "reader";
   const qrInstance = useRef(null);
   const lastDecodedRef = useRef({ text: "", t: 0 });
 
-  const title = useMemo(() => (mode === "events" ? "Events" : "Distribution"), [mode]);
+  // Camera flip
+  const [cameras, setCameras] = useState([]);
+  const [cameraIndex, setCameraIndex] = useState(0);
 
-function dismissWelcome() {
-  if (screen !== "welcome") return;
-  setWelcomeStage("out");
-  setTimeout(() => setScreen("app"), 350);
-}
+  const title = useMemo(
+    () => (mode === "events" ? "Events" : "Distribution"),
+    [mode]
+  );
 
-function showBanner(text, type = "ok", seconds = 1.5) {
-
+  function showBanner(text, type = "ok", seconds = 1.5) {
     setBanner({ text, type });
     if (bannerTimer.current) clearTimeout(bannerTimer.current);
     bannerTimer.current = setTimeout(() => setBanner(null), seconds * 1000);
   }
+
+  function dismissWelcome() {
+    if (screen !== "welcome") return;
+    setWelcomeStage("out");
+    setTimeout(() => setScreen("app"), 350);
+  }
+
+  // Welcome: 3 seconds then fade out
+  useEffect(() => {
+    if (screen !== "welcome") return;
+    setWelcomeStage("in");
+    const t1 = setTimeout(() => setWelcomeStage("out"), 2600);
+    const t2 = setTimeout(() => setScreen("app"), 3000);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, [screen]);
 
   async function loadRecords() {
     const rows = await db.records.where({ mode }).toArray();
@@ -74,19 +92,6 @@ function showBanner(text, type = "ok", seconds = 1.5) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen, mode]);
 
-  // Welcome auto transition
-useEffect(() => {
-  if (screen !== "welcome") return;
-  setWelcomeStage("in");
-  const t1 = setTimeout(() => setWelcomeStage("out"), 2600);
-  const t2 = setTimeout(() => setScreen("app"), 3000);
-  return () => {
-    clearTimeout(t1);
-    clearTimeout(t2);
-  };
-}, [screen]);
-
-
   // Auto-submit on exactly 7 digits in Events mode
   useEffect(() => {
     const v = scan.trim();
@@ -96,6 +101,7 @@ useEffect(() => {
     }
   }, [scan, mode]); // eslint-disable-line
 
+  // CSV import/export (supports importing exported CSV to switch phones)
   async function importCSV(file) {
     const rows = (await parseCSV(file)).map((r) => {
       const ID = normalizeId(r.ID);
@@ -226,20 +232,35 @@ useEffect(() => {
     showBanner("Cleared all records.", "ok", 1.5);
   }
 
-  // Camera scanning controls (continuous, corner)
+  // Camera scanner controls (continuous, corner)
+  async function ensureCamerasLoaded() {
+    try {
+      const cams = await Html5Qrcode.getCameras();
+      setCameras(cams || []);
+      return cams || [];
+    } catch {
+      setCameras([]);
+      return [];
+    }
+  }
+
   async function startScanner() {
     try {
       if (qrInstance.current) return;
+
       const q = new Html5Qrcode(qrRefId);
       qrInstance.current = q;
 
-      const cameras = await Html5Qrcode.getCameras();
-      const cameraId = cameras?.[0]?.id;
+      const cams = cameras.length ? cameras : await ensureCamerasLoaded();
+      const picked =
+        cams && cams.length ? cams[Math.min(cameraIndex, cams.length - 1)] : null;
 
+      // Prefer picked camera; fallback to environment
       await q.start(
-        cameraId || { facingMode: "environment" },
+        picked?.id || { facingMode: "environment" },
         { fps: 12, qrbox: { width: 190, height: 190 }, aspectRatio: 1.0 },
         (decodedText) => {
+          // Debounce repeated reads
           const now = Date.now();
           const last = lastDecodedRef.current;
           if (decodedText === last.text && now - last.t < 1500) return;
@@ -267,42 +288,63 @@ useEffect(() => {
     }
   }
 
+  async function flipCamera() {
+    const cams = cameras.length ? cameras : await ensureCamerasLoaded();
+    if (!cams || cams.length <= 1) return;
+
+    await stopScanner();
+    setCameraIndex((i) => (i + 1) % cams.length);
+    // restart after state updates
+    setTimeout(() => startScanner(), 60);
+  }
+
   useEffect(() => {
     if (!scanOpen) {
       stopScanner();
       return;
     }
+
+    // load cameras once when opening
+    if (scanOpen && cameras.length === 0) {
+      ensureCamerasLoaded();
+    }
+
     startScanner();
     return () => stopScanner();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanOpen]);
 
+  // Also restart scanner if cameraIndex changes while open
+  useEffect(() => {
+    if (!scanOpen) return;
+    // restart to apply new camera
+    (async () => {
+      await stopScanner();
+      setTimeout(() => startScanner(), 60);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraIndex]);
+
   if (screen === "welcome") {
-  return (
-    <div style={styles.page}>
-      <div
-        style={{
-          ...styles.card,
-          opacity: welcomeStage === "in" ? 1 : 0,
-          transform: welcomeStage === "in" ? "translateY(0px)" : "translateY(10px)",
-          transition: "opacity 420ms ease, transform 420ms ease",
-        }}
-      >
-        <div style={styles.h1}>{getGreeting()}</div>
-        <div style={{ ...styles.p, marginBottom: 6 }}>{formatDateLong()}</div>
-        <div style={styles.p}>
-          Ready to scan!!
-        </div>
-        <div style={{ fontSize: 12, opacity: 0.75, fontWeight: 700 }}>
-          Loading…
+    return (
+      <div style={styles.page} onClick={dismissWelcome}>
+        <div
+          style={{
+            ...styles.card,
+            opacity: welcomeStage === "in" ? 1 : 0,
+            transform: welcomeStage === "in" ? "translateY(0px)" : "translateY(10px)",
+            transition: "opacity 420ms ease, transform 420ms ease",
+          }}
+        >
+          <div style={styles.h1}>{getGreeting()}</div>
+          <div style={{ ...styles.p, marginBottom: 6 }}>{formatDateLong()}</div>
+          <div style={styles.p}>Ready to scan.</div>
         </div>
       </div>
-    </div>
-  );
-}
+    );
+  }
 
-return (
-
+  return (
     <div style={styles.page}>
       {banner && (
         <div
@@ -312,7 +354,14 @@ return (
           }}
           onClick={() => setBanner(null)}
         >
-          <div style={{ whiteSpace: "pre-line", textAlign: "center", fontWeight: 900, fontSize: 22 }}>
+          <div
+            style={{
+              whiteSpace: "pre-line",
+              textAlign: "center",
+              fontWeight: 900,
+              fontSize: 22,
+            }}
+          >
             {banner.text}
           </div>
           <div style={{ marginTop: 12, opacity: 0.95, fontWeight: 800 }}>
@@ -325,14 +374,27 @@ return (
         <div style={styles.cornerScanner}>
           <div style={styles.cornerHeader}>
             <div style={{ fontWeight: 900, fontSize: 13 }}>Scan</div>
-            <button
-              style={styles.xBtn}
-              onClick={() => setScanOpen(false)}
-              aria-label="Close scanner"
-              title="Close"
-            >
-              ✕
-            </button>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <button
+                style={{
+                  ...styles.flipBtn,
+                  opacity: cameras.length > 1 ? 1 : 0.45,
+                }}
+                onClick={flipCamera}
+                title="Flip camera"
+                aria-label="Flip camera"
+              >
+                ↺
+              </button>
+              <button
+                style={styles.xBtn}
+                onClick={() => setScanOpen(false)}
+                aria-label="Close scanner"
+                title="Close"
+              >
+                ✕
+              </button>
+            </div>
           </div>
           <div id={qrRefId} style={styles.cornerBody} />
         </div>
@@ -343,13 +405,19 @@ return (
 
         <div style={styles.row}>
           <button
-            style={{ ...styles.chip, background: mode === "events" ? "#111827" : "transparent" }}
+            style={{
+              ...styles.chip,
+              background: mode === "events" ? "#111827" : "transparent",
+            }}
             onClick={() => setMode("events")}
           >
             Events
           </button>
           <button
-            style={{ ...styles.chip, background: mode === "distribution" ? "#111827" : "transparent" }}
+            style={{
+              ...styles.chip,
+              background: mode === "distribution" ? "#111827" : "transparent",
+            }}
             onClick={() => setMode("distribution")}
           >
             Distribution
@@ -399,7 +467,7 @@ return (
         </div>
 
         <div style={{ marginTop: 10, fontSize: 12, opacity: 0.8 }}>
-          Tip: To switch phones, Export CSV on old phone → AirDrop/Files → Import CSV on new phone.
+          Export on Phone A → Import on Phone B to switch phones.
         </div>
       </div>
 
@@ -424,7 +492,9 @@ return (
                 <button
                   key={r.id}
                   style={styles.rowItem}
-                  onClick={() => handleSubmit(mode === "events" ? r.studentId : r.studentId || r.name)}
+                  onClick={() =>
+                    handleSubmit(mode === "events" ? r.studentId : r.studentId || r.name)
+                  }
                 >
                   <div style={{ fontWeight: 900 }}>{r.name || "(No name)"}</div>
                   <div style={{ opacity: 0.9, fontSize: 13 }}>
@@ -562,6 +632,16 @@ const styles = {
     justifyContent: "space-between",
     padding: "8px 10px",
     borderBottom: "1px solid rgba(255,255,255,0.08)",
+  },
+  flipBtn: {
+    border: "1px solid rgba(255,255,255,0.16)",
+    background: "#111827",
+    color: "#e5e7eb",
+    fontWeight: 900,
+    fontSize: 14,
+    cursor: "pointer",
+    padding: "4px 8px",
+    borderRadius: 10,
   },
   xBtn: {
     border: "none",
