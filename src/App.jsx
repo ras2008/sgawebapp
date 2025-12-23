@@ -58,6 +58,7 @@ export default function App() {
   const qrRefId = "reader";
   const qrInstance = useRef(null);
   const lastDecodedRef = useRef({ text: "", t: 0 });
+  const photoInputRef = useRef(null);
 
   const title = useMemo(
     () => (mode === "events" ? "Events" : "Distribution"),
@@ -249,32 +250,23 @@ export default function App() {
       return [];
     }
   }
+function getScanConfig() {
+  return {
+    fps: 20,
+    // Wide + short box that always fits the viewfinder (better for small 1D Code 128)
+    qrbox: (vw, vh) => {
+      const width = Math.floor(vw * 0.96);
+      const height = Math.floor(Math.min(vh * 0.35, 140));
+      return { width, height };
+    },
+    formatsToSupport: [Html5QrcodeSupportedFormats.CODE_128],
+    showTorchButtonIfSupported: true,
+    showZoomSliderIfSupported: true,
+    defaultZoomValueIfSupported: 3.5,
+    experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+  };
+}
 
-  function getScanConfig() {
-    // Corner view is small: we auto-fit a wide/short box.
-    // Expanded view gets more pixels => MUCH better for small ID cards.
-    return {
-      fps: 20,
-
-      // Always draw a visible box, sized to the actual viewfinder:
-      qrbox: (vw, vh) => {
-        const width = Math.floor(vw * 0.96);
-        const height = Math.floor(Math.min(vh * (scannerExpanded ? 0.35 : 0.42), scannerExpanded ? 140 : 105));
-        return { width, height };
-      },
-
-      // ONLY scan Code 128 (big speed win)
-      formatsToSupport: [Html5QrcodeSupportedFormats.CODE_128],
-
-      // iPhone helpers
-      showTorchButtonIfSupported: true,
-      showZoomSliderIfSupported: true,
-      defaultZoomValueIfSupported: scannerExpanded ? 2.5 : 3,
-
-      // Prefer native BarcodeDetector (when available) for speed
-      experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-    };
-  }
 
   async function startScanner() {
     try {
@@ -365,7 +357,24 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scannerExpanded]);
 
-  // ---- UI ----
+  async function photoScanFile(file) {
+  if (!file) return;
+  try {
+    // Stop live scanner to avoid iOS camera conflicts
+    await stopScanner();
+
+    // Fresh instance for file scan
+    const q = new Html5Qrcode(qrRefId);
+    const result = await q.scanFile(file, false);
+    await q.clear();
+
+    handleSubmit(result);
+  } catch (e) {
+    showBanner("Couldn’t read photo. Try brighter light / closer crop.", "bad", 2.2);
+  }
+}
+
+// ---- UI ----
   if (screen === "welcome") {
     return (
       <div style={styles.page} onClick={dismissWelcome}>
@@ -478,9 +487,28 @@ export default function App() {
         </div>
 
         <div style={styles.row}>
-          <button style={styles.btnSecondary} onClick={() => setScanOpen((v) => !v)}>
+          <button style={styles.btnSecondary} onClick={() => {
+              setScannerExpanded(true);
+              setScanOpen((v) => !v);
+            }}>
             {scanOpen ? "Hide Camera" : "Camera Scan"}
           </button>
+
+          <label style={styles.btnSecondary}>
+            Photo Scan
+            <input
+              ref={photoInputRef}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              hidden
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.target.value = "";
+                if (f) photoScanFile(f);
+              }}
+            />
+          </label>
 
           <label style={styles.fileBtn}>
             Import CSV
