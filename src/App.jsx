@@ -601,7 +601,7 @@ const styles = {
     border: "1px solid rgba(255,255,255,0.08)",
   },
   header: { display: "flex", alignItems: "center", gap: 12, marginBottom: 6 },
-  logo: { height: 44, width: 44, objectFit: "contain" },
+  logo: { height: 55, width: 55, objectFit: "contain" },
 
   welcomeLogoWrap: { display: "flex", justifyContent: "center", marginBottom: 12 },
   welcomeLogo: { height: 86, width: 86, objectFit: "contain" },
