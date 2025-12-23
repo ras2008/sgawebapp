@@ -258,7 +258,7 @@ export default function App() {
       // Prefer picked camera; fallback to environment
       await q.start(
         picked?.id || { facingMode: "environment" },
-        { fps: 13, qrbox: { width: 150, height: 130 }, aspectRatio: 1.0 },
+        { fps: 12, qrbox: { width: 190, height: 190 }, aspectRatio: 1.0 },
         (decodedText) => {
           // Debounce repeated reads
           const now = Date.now();
