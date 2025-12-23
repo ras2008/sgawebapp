@@ -245,36 +245,51 @@ export default function App() {
   }
 
   async function startScanner() {
-    try {
-      if (qrInstance.current) return;
+  try {
+    if (qrInstance.current) return;
 
-      const q = new Html5Qrcode(qrRefId);
-      qrInstance.current = q;
+    const q = new Html5Qrcode(qrRefId);
+    qrInstance.current = q;
 
-      const cams = cameras.length ? cameras : await ensureCamerasLoaded();
-      const picked =
-        cams && cams.length ? cams[Math.min(cameraIndex, cams.length - 1)] : null;
+    const cams = cameras.length ? cameras : await ensureCamerasLoaded();
+    const picked =
+      cams && cams.length ? cams[Math.min(cameraIndex, cams.length - 1)] : null;
 
-      // Tighter scan box = faster lock
-      await q.start(
-  picked?.id || { facingMode: "environment" },
-  {
-    fps: 24,
-    qrbox: { width: 260, height: 110 },
-    formatsToSupport: [Html5QrcodeSupportedFormats.CODE_128],
-    showTorchButtonIfSupported: true,
-    showZoomSliderIfSupported: true,
-    defaultZoomValueIfSupported: 2,
-  },
-  (decodedText) => { /* your existing handler */ },
-  () => {}
-);
-    } catch (e) {
-      showBanner("Camera scan not available. Use typing.", "bad", 2);
-      stopScanner();
-      setScanOpen(false);
-    }
+    await q.start(
+      picked?.id || { facingMode: "environment" },
+      {
+        fps: 24,
+
+        // Auto-fit scan box to the tiny corner window + barcode shape (wide + short)
+        qrbox: (vw, vh) => {
+          const width = Math.floor(Math.min(vw * 0.92, 220));
+          const height = Math.floor(Math.min(vh * 0.42, 95));
+          return { width, height };
+        },
+
+        // ONLY scan Code 128 (huge speed boost)
+        formatsToSupport: [Html5QrcodeSupportedFormats.CODE_128],
+
+        // Helpful on iPhone
+        showTorchButtonIfSupported: true,
+        showZoomSliderIfSupported: true,
+        defaultZoomValueIfSupported: 2,
+      },
+      (decodedText) => {
+        const now = Date.now();
+        const last = lastDecodedRef.current;
+        if (decodedText === last.text && now - last.t < 1500) return;
+        lastDecodedRef.current = { text: decodedText, t: now };
+        handleSubmit(decodedText);
+      },
+      () => {}
+    );
+  } catch (e) {
+    showBanner("Camera scan not available. Use typing.", "bad", 2);
+    stopScanner();
+    setScanOpen(false);
   }
+}
 
   async function stopScanner() {
     try {
