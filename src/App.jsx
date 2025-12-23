@@ -53,7 +53,6 @@ export default function App() {
 
   // Scanner UI
   const [scanOpen, setScanOpen] = useState(false);
-  const [scannerExpanded, setScannerExpanded] = useState(true); // default expanded for small IDs
 
   // Cameras (for flip)
   const [videoInputs, setVideoInputs] = useState([]); // [{deviceId,label}]
@@ -244,54 +243,20 @@ export default function App() {
     showBanner("Cleared all records.", "ok", 1.5);
   }
 
-  // ---- Camera enumeration (for flip) ----
+  // ---- QUAGGA2 LIVE SCANNER (demo-style: locate + overlay boxes) ----
+
+  // Best-effort: refresh cameras for flip. (Labels appear after permission.)
   async function refreshVideoInputs() {
     try {
-      if (!navigator.mediaDevices?.enumerateDevices) return;
+      if (!navigator.mediaDevices?.enumerateDevices) return [];
       const devices = await navigator.mediaDevices.enumerateDevices();
       const vids = devices.filter((d) => d.kind === "videoinput");
-      setVideoInputs(vids.map((d) => ({ deviceId: d.deviceId, label: d.label || "Camera" })));
-      return vids;
+      const list = vids.map((d) => ({ deviceId: d.deviceId, label: d.label || "Camera" }));
+      setVideoInputs(list);
+      return list;
     } catch {
-      // ignore
+      return [];
     }
-  }
-
-  // ---- QUAGGA ----
-  function quaggaConfig() {
-    const useDeviceId = videoInputs?.[cameraIndex]?.deviceId;
-
-    // Expanded scanner gives more pixels => higher decode success
-    // Also we scan a center horizontal band (name above / ID text below).
-    const area = scannerExpanded
-      ? { top: "30%", right: "5%", left: "5%", bottom: "30%" }
-      : { top: "35%", right: "5%", left: "5%", bottom: "35%" };
-
-    const constraints = useDeviceId
-      ? { deviceId: { exact: useDeviceId } }
-      : { facingMode: "environment" };
-
-    return {
-      inputStream: {
-        type: "LiveStream",
-        target: document.querySelector("#quagga-view"),
-        constraints: {
-          ...constraints,
-          width: { ideal: scannerExpanded ? 1920 : 1280 },
-          height: { ideal: scannerExpanded ? 1080 : 720 },
-        },
-        area,
-      },
-      locator: {
-        locate: true,
-        halfSample: true,
-        patchSize: "medium",
-      },
-      decoder: {
-        readers: ["code_128_reader"],
-      },
-      locate: true,
-    };
   }
 
   function stopScanner() {
@@ -308,32 +273,6 @@ export default function App() {
     }
   }
 
-  function onDetected(result) {
-    const code = result?.codeResult?.code;
-    if (!code) return;
-
-    // Confirm 2 same reads close together to reduce misreads
-    const now = Date.now();
-    const last = lastDetectedRef.current;
-
-    if (code === last.text && now - last.t < 900) {
-      last.streak += 1;
-    } else {
-      last.text = code;
-      last.t = now;
-      last.streak = 1;
-    }
-
-    // Need 2 confirmations
-    if (last.streak < 2) return;
-
-    // Cooldown so it doesn't spam
-    last.t = now;
-    last.streak = 0;
-
-    handleSubmit(code);
-  }
-
   function onProcessed(result) {
     try {
       const ctx = Quagga.canvas?.ctx?.overlay;
@@ -343,6 +282,7 @@ export default function App() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       if (result) {
+        // many small boxes while it searches (demo behavior)
         if (result.boxes) {
           result.boxes
             .filter((b) => b !== result.box)
@@ -354,13 +294,15 @@ export default function App() {
             });
         }
 
+        // best candidate
         if (result.box) {
           Quagga.ImageDebug.drawPath(result.box, { x: 0, y: 1 }, ctx, {
-            color: "rgba(0,255,0,0.95)",
+            color: "rgba(0,255,0,0.9)",
             lineWidth: 3,
           });
         }
 
+        // scan line
         if (result.line) {
           Quagga.ImageDebug.drawPath(result.line, { x: "x", y: "y" }, ctx, {
             color: "rgba(255,0,0,0.9)",
@@ -373,28 +315,85 @@ export default function App() {
     }
   }
 
-  async function startScanner() {
+  function onDetected(result) {
+    const code = result?.codeResult?.code;
+    if (!code) return;
+
+    // require 2 quick confirmations to reduce misreads, but still feel fast
+    const now = Date.now();
+    const last = lastDetectedRef.current;
+
+    if (code === last.text && now - last.t < 900) {
+      last.streak += 1;
+    } else {
+      last.text = code;
+      last.t = now;
+      last.streak = 1;
+    }
+
+    if (last.streak < 2) return;
+
+    // cooldown so it doesn't spam
+    last.t = now;
+    last.streak = 0;
+
+    handleSubmit(code);
+  }
+
+  function startScanner() {
     try {
       if (quaggaRunningRef.current) return;
 
-      // Important: enumerate AFTER permission; but it helps for flip on most devices.
-      await refreshVideoInputs();
+      const targetEl = document.querySelector("#quagga-view");
+      if (!targetEl) return;
 
-      const cfg = quaggaConfig();
+      const useDeviceId = videoInputs?.[cameraIndex]?.deviceId;
+      const constraints = useDeviceId
+        ? { deviceId: { exact: useDeviceId } }
+        : { facingMode: "environment" };
 
-      Quagga.init(cfg, (err) => {
-        if (err) {
-          console.error(err);
-          showBanner("Camera scan failed. Try reloading / HTTPS.", "bad", 2.0);
-          setScanOpen(false);
-          return;
+      Quagga.init(
+        {
+          numOfWorkers: Math.min(4, navigator.hardwareConcurrency || 2),
+          inputStream: {
+            type: "LiveStream",
+            target: targetEl,
+            constraints: {
+              ...constraints,
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            },
+            // Full frame hunt like the demo
+            area: { top: "0%", right: "0%", left: "0%", bottom: "0%" },
+          },
+          locator: {
+            locate: true,
+            halfSample: true,
+            patchSize: "medium",
+          },
+          decoder: {
+            readers: ["code_128_reader"],
+          },
+          locate: true,
+        },
+        async (err) => {
+          if (err) {
+            console.error(err);
+            showBanner("Camera scan failed. Try reloading / HTTPS.", "bad", 2.0);
+            setScanOpen(false);
+            return;
+          }
+
+          Quagga.onProcessed(onProcessed);
+          Quagga.onDetected(onDetected);
+          Quagga.start();
+          quaggaRunningRef.current = true;
+
+          // after permissions, enumerate so flip works more reliably
+          const list = await refreshVideoInputs();
+          if (list?.length && cameraIndex >= list.length) setCameraIndex(0);
         }
-
-        Quagga.onProcessed(onProcessed);
-        Quagga.onDetected(onDetected);
-        Quagga.start();
-        quaggaRunningRef.current = true;
-      });
+      );
     } catch (e) {
       console.error(e);
       showBanner("Camera scan failed. Try reloading / HTTPS.", "bad", 2.0);
@@ -408,18 +407,12 @@ export default function App() {
     setCameraIndex((i) => (i + 1) % videoInputs.length);
   }
 
-  function toggleExpanded() {
-    stopScanner();
-    setScannerExpanded((v) => !v);
-  }
-
-  // Start/stop based on scanOpen
+  // Start/stop scanner
   useEffect(() => {
     if (!scanOpen) {
       stopScanner();
       return;
     }
-    // Start after DOM has rendered the target container
     const t = setTimeout(() => startScanner(), 80);
     return () => {
       clearTimeout(t);
@@ -428,21 +421,13 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanOpen]);
 
-  // Restart when cameraIndex changes (flip)
+  // Restart on flip
   useEffect(() => {
     if (!scanOpen) return;
     const t = setTimeout(() => startScanner(), 80);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraIndex]);
-
-  // Restart when expanded toggles (size/area/constraints change)
-  useEffect(() => {
-    if (!scanOpen) return;
-    const t = setTimeout(() => startScanner(), 120);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scannerExpanded]);
 
   // ---- UI ----
   if (screen === "welcome") {
@@ -493,7 +478,14 @@ export default function App() {
       )}
 
       {scanOpen && (
-        <div style={scannerExpanded ? styles.bigScanner : styles.cornerScanner}>
+        <div style={styles.bigScanner}>
+          <style>{`
+            #quagga-view { position: relative; }
+            #quagga-view video, #quagga-view canvas { width: 100% !important; height: 100% !important; }
+            #quagga-view canvas { position: absolute !important; top: 0; left: 0; z-index: 3; }
+            #quagga-view video { position: absolute !important; top: 0; left: 0; z-index: 2; object-fit: cover; }
+            #quagga-view canvas { pointer-events: none; }
+          `}</style>
           <div style={styles.cornerHeader}>
             <div style={{ fontWeight: 900, fontSize: 13 }}>Scan</div>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -504,14 +496,6 @@ export default function App() {
                 aria-label="Flip camera"
               >
                 ↺
-              </button>
-              <button
-                style={styles.smallBtn}
-                onClick={toggleExpanded}
-                title="Resize"
-                aria-label="Resize"
-              >
-                ⤢
               </button>
               <button
                 style={styles.xBtn}
@@ -569,7 +553,6 @@ export default function App() {
           <button
             style={styles.btnSecondary}
             onClick={() => {
-              setScannerExpanded(true); // best for small ID cards
               setScanOpen((v) => !v);
             }}
           >
@@ -814,6 +797,7 @@ const styles = {
     width: "100%",
     height: "100%",
     position: "relative",
+    overflow: "hidden",
   },
 
   // subtle band hint (doesn't tell the user what to do, just helps aim)
