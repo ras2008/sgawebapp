@@ -1,5 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Html5Qrcode, Html5QrcodeSupportedFormats } from "html5-qrcode";
+import {
+  Html5Qrcode,
+  Html5QrcodeSupportedFormats,
+} from "html5-qrcode";
 import { db } from "./db";
 import { downloadCSV, parseCSV } from "./csv";
 
@@ -43,15 +46,18 @@ export default function App() {
   const [banner, setBanner] = useState(null); // {text, type}
   const bannerTimer = useRef(null);
 
-  // Corner camera scanner
+  // Scanner UI
   const [scanOpen, setScanOpen] = useState(false);
-  const qrRefId = "reader";
-  const qrInstance = useRef(null);
-  const lastDecodedRef = useRef({ text: "", t: 0 });
+  const [scannerExpanded, setScannerExpanded] = useState(false);
 
   // Camera flip
   const [cameras, setCameras] = useState([]);
   const [cameraIndex, setCameraIndex] = useState(0);
+
+  // html5-qrcode
+  const qrRefId = "reader";
+  const qrInstance = useRef(null);
+  const lastDecodedRef = useRef({ text: "", t: 0 });
 
   const title = useMemo(
     () => (mode === "events" ? "Events" : "Distribution"),
@@ -70,7 +76,7 @@ export default function App() {
     setTimeout(() => setScreen("app"), 350);
   }
 
-  // Welcome: 3 seconds then fade out
+  // Welcome: 3 seconds then fade out (also tap anywhere to dismiss)
   useEffect(() => {
     if (screen !== "welcome") return;
     setWelcomeStage("in");
@@ -92,7 +98,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen, mode]);
 
-  // Auto-submit on exactly 7 digits in Events mode
+  // Auto-submit exactly 7 digits in Events mode
   useEffect(() => {
     const v = scan.trim();
     if (mode === "events" && /^\d{7}$/.test(v)) {
@@ -101,7 +107,7 @@ export default function App() {
     }
   }, [scan, mode]); // eslint-disable-line
 
-  // CSV import/export (supports importing exported CSV to switch phones)
+  // CSV import/export
   async function importCSV(file) {
     const rows = (await parseCSV(file)).map((r) => {
       const ID = normalizeId(r.ID);
@@ -117,7 +123,7 @@ export default function App() {
       };
     });
 
-    // Replace current mode roster with imported rows
+    // Replace current mode data with imported rows
     await db.records.where({ mode }).delete();
 
     const toInsert = rows
@@ -232,7 +238,7 @@ export default function App() {
     showBanner("Cleared all records.", "ok", 1.5);
   }
 
-  // Camera scanner controls (continuous, corner)
+  // ---- CAMERA / SCANNER ----
   async function ensureCamerasLoaded() {
     try {
       const cams = await Html5Qrcode.getCameras();
@@ -244,52 +250,61 @@ export default function App() {
     }
   }
 
-  async function startScanner() {
-  try {
-    if (qrInstance.current) return;
+  function getScanConfig() {
+    // Corner view is small: we auto-fit a wide/short box.
+    // Expanded view gets more pixels => MUCH better for small ID cards.
+    return {
+      fps: 20,
 
-    const q = new Html5Qrcode(qrRefId);
-    qrInstance.current = q;
-
-    const cams = cameras.length ? cameras : await ensureCamerasLoaded();
-    const picked =
-      cams && cams.length ? cams[Math.min(cameraIndex, cams.length - 1)] : null;
-
-    await q.start(
-      picked?.id || { facingMode: "environment" },
-      {
-        fps: 24,
-
-        // Auto-fit scan box to the tiny corner window + barcode shape (wide + short)
-        qrbox: (vw, vh) => {
-          const width = Math.floor(Math.min(vw * 0.92, 220));
-          const height = Math.floor(Math.min(vh * 0.42, 95));
-          return { width, height };
-        },
-
-        // ONLY scan Code 128 (huge speed boost)
-        formatsToSupport: [Html5QrcodeSupportedFormats.CODE_128],
-
-        // Helpful on iPhone
-        showTorchButtonIfSupported: true,
-        showZoomSliderIfSupported: true,
-        defaultZoomValueIfSupported: 2,
+      // Always draw a visible box, sized to the actual viewfinder:
+      qrbox: (vw, vh) => {
+        const width = Math.floor(vw * 0.96);
+        const height = Math.floor(Math.min(vh * (scannerExpanded ? 0.35 : 0.42), scannerExpanded ? 140 : 105));
+        return { width, height };
       },
-      (decodedText) => {
-        const now = Date.now();
-        const last = lastDecodedRef.current;
-        if (decodedText === last.text && now - last.t < 1500) return;
-        lastDecodedRef.current = { text: decodedText, t: now };
-        handleSubmit(decodedText);
-      },
-      () => {}
-    );
-  } catch (e) {
-    showBanner("Camera scan not available. Use typing.", "bad", 2);
-    stopScanner();
-    setScanOpen(false);
+
+      // ONLY scan Code 128 (big speed win)
+      formatsToSupport: [Html5QrcodeSupportedFormats.CODE_128],
+
+      // iPhone helpers
+      showTorchButtonIfSupported: true,
+      showZoomSliderIfSupported: true,
+      defaultZoomValueIfSupported: scannerExpanded ? 2.5 : 3,
+
+      // Prefer native BarcodeDetector (when available) for speed
+      experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+    };
   }
-}
+
+  async function startScanner() {
+    try {
+      if (qrInstance.current) return;
+
+      const q = new Html5Qrcode(qrRefId);
+      qrInstance.current = q;
+
+      const cams = cameras.length ? cameras : await ensureCamerasLoaded();
+      const picked =
+        cams && cams.length ? cams[Math.min(cameraIndex, cams.length - 1)] : null;
+
+      await q.start(
+        picked?.id || { facingMode: "environment" },
+        getScanConfig(),
+        (decodedText) => {
+          const now = Date.now();
+          const last = lastDecodedRef.current;
+          if (decodedText === last.text && now - last.t < 1200) return;
+          lastDecodedRef.current = { text: decodedText, t: now };
+          handleSubmit(decodedText);
+        },
+        () => {}
+      );
+    } catch (e) {
+      showBanner("Camera scan not available. Use typing.", "bad", 2);
+      stopScanner();
+      setScanOpen(false);
+    }
+  }
 
   async function stopScanner() {
     try {
@@ -309,31 +324,48 @@ export default function App() {
 
     await stopScanner();
     setCameraIndex((i) => (i + 1) % cams.length);
-    setTimeout(() => startScanner(), 60);
+    setTimeout(() => startScanner(), 80);
   }
 
+  async function toggleExpanded() {
+    await stopScanner();
+    setScannerExpanded((v) => !v);
+    setTimeout(() => startScanner(), 120);
+  }
+
+  // Start/stop scanner when opened/closed
   useEffect(() => {
     if (!scanOpen) {
       stopScanner();
       return;
     }
-    if (scanOpen && cameras.length === 0) {
-      ensureCamerasLoaded();
-    }
+    if (scanOpen && cameras.length === 0) ensureCamerasLoaded();
     startScanner();
     return () => stopScanner();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanOpen]);
 
+  // Restart scanner if camera changes
   useEffect(() => {
     if (!scanOpen) return;
     (async () => {
       await stopScanner();
-      setTimeout(() => startScanner(), 60);
+      setTimeout(() => startScanner(), 80);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraIndex]);
 
+  // Restart scanner if expanded mode changes (pixel layout changes)
+  useEffect(() => {
+    if (!scanOpen) return;
+    (async () => {
+      await stopScanner();
+      setTimeout(() => startScanner(), 120);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scannerExpanded]);
+
+  // ---- UI ----
   if (screen === "welcome") {
     return (
       <div style={styles.page} onClick={dismissWelcome}>
@@ -348,10 +380,8 @@ export default function App() {
           <div style={styles.welcomeLogoWrap}>
             <img src="/sga-logo.png" alt="SGA" style={styles.welcomeLogo} />
           </div>
-
           <div style={styles.h1}>{getGreeting()}</div>
           <div style={{ ...styles.p, marginBottom: 6 }}>{formatDateLong()}</div>
-          <div style={styles.p}>Ready to scan.</div>
         </div>
       </div>
     );
@@ -370,22 +400,32 @@ export default function App() {
           <div style={{ whiteSpace: "pre-line", textAlign: "center", fontWeight: 900, fontSize: 22 }}>
             {banner.text}
           </div>
-          <div style={{ marginTop: 12, opacity: 0.95, fontWeight: 800 }}>Tap to dismiss</div>
+          <div style={{ marginTop: 12, opacity: 0.95, fontWeight: 800 }}>
+            Tap to dismiss
+          </div>
         </div>
       )}
 
       {scanOpen && (
-        <div style={styles.cornerScanner}>
+        <div style={scannerExpanded ? styles.bigScanner : styles.cornerScanner}>
           <div style={styles.cornerHeader}>
             <div style={{ fontWeight: 900, fontSize: 13 }}>Scan</div>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <button
-                style={{ ...styles.flipBtn, opacity: cameras.length > 1 ? 1 : 0.45 }}
+                style={{ ...styles.smallBtn, opacity: cameras.length > 1 ? 1 : 0.45 }}
                 onClick={flipCamera}
                 title="Flip camera"
                 aria-label="Flip camera"
               >
                 ↺
+              </button>
+              <button
+                style={styles.smallBtn}
+                onClick={toggleExpanded}
+                title="Resize"
+                aria-label="Resize"
+              >
+                ⤢
               </button>
               <button
                 style={styles.xBtn}
@@ -397,7 +437,7 @@ export default function App() {
               </button>
             </div>
           </div>
-          <div id={qrRefId} style={styles.cornerBody} />
+          <div id={qrRefId} style={styles.readerBody} />
         </div>
       )}
 
@@ -533,13 +573,14 @@ const styles = {
     border: "1px solid rgba(255,255,255,0.08)",
   },
   header: { display: "flex", alignItems: "center", gap: 12, marginBottom: 6 },
-  logo: { height: 50, width: 50, objectFit: "contain" },
+  logo: { height: 44, width: 44, objectFit: "contain" },
 
-  welcomeLogoWrap: { display: "flex", justifyContent: "center", marginBottom: 10 },
-  welcomeLogo: { height: 80, width: 80, objectFit: "contain" },
+  welcomeLogoWrap: { display: "flex", justifyContent: "center", marginBottom: 12 },
+  welcomeLogo: { height: 86, width: 86, objectFit: "contain" },
 
   h1: { fontSize: 22, fontWeight: 900, marginBottom: 6 },
   p: { opacity: 0.9, marginBottom: 12, lineHeight: 1.35 },
+
   row: { display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginTop: 10 },
   chip: {
     padding: "10px 12px",
@@ -593,6 +634,7 @@ const styles = {
     fontWeight: 900,
     cursor: "pointer",
   },
+
   list: { maxWidth: 760, margin: "12px auto 0" },
   rowItem: {
     width: "100%",
@@ -605,6 +647,7 @@ const styles = {
     color: "#e5e7eb",
   },
   empty: { opacity: 0.85, padding: 18 },
+
   banner: {
     position: "fixed",
     inset: 0,
@@ -614,11 +657,13 @@ const styles = {
     padding: 24,
     color: "white",
   },
+
   cornerScanner: {
     position: "fixed",
     right: 12,
     bottom: 12,
-    width: 240,
+    width: 260,
+    height: 280,
     background: "#0b1220",
     border: "1px solid rgba(255,255,255,0.14)",
     borderRadius: 16,
@@ -626,6 +671,22 @@ const styles = {
     zIndex: 40,
     boxShadow: "0 12px 32px rgba(0,0,0,0.35)",
   },
+
+  // Expanded scanner for small ID cards
+  bigScanner: {
+    position: "fixed",
+    left: 12,
+    right: 12,
+    bottom: 12,
+    height: "50vh",
+    background: "#0b1220",
+    border: "1px solid rgba(255,255,255,0.14)",
+    borderRadius: 16,
+    overflow: "hidden",
+    zIndex: 40,
+    boxShadow: "0 12px 32px rgba(0,0,0,0.35)",
+  },
+
   cornerHeader: {
     display: "flex",
     alignItems: "center",
@@ -633,25 +694,7 @@ const styles = {
     padding: "8px 10px",
     borderBottom: "1px solid rgba(255,255,255,0.08)",
   },
-  flipBtn: {
+
+  smallBtn: {
     border: "1px solid rgba(255,255,255,0.16)",
-    background: "#111827",
-    color: "#e5e7eb",
-    fontWeight: 900,
-    fontSize: 14,
-    cursor: "pointer",
-    padding: "4px 8px",
-    borderRadius: 10,
-  },
-  xBtn: {
-    border: "none",
-    background: "transparent",
-    color: "#e5e7eb",
-    fontWeight: 900,
-    fontSize: 16,
-    cursor: "pointer",
-    padding: "2px 6px",
-    borderRadius: 8,
-  },
-  cornerBody: { width: "100%", height: 240 },
-};
+    background: "#111827
