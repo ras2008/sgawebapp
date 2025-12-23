@@ -255,12 +255,11 @@ export default function App() {
       const picked =
         cams && cams.length ? cams[Math.min(cameraIndex, cams.length - 1)] : null;
 
-      // Prefer picked camera; fallback to environment
+      // Tighter scan box = faster lock
       await q.start(
         picked?.id || { facingMode: "environment" },
-        { fps: 12, qrbox: { width: 190, height: 190 }, aspectRatio: 1.0 },
+        { fps: 15, qrbox: { width: 130, height: 130 }, aspectRatio: 1.0 },
         (decodedText) => {
-          // Debounce repeated reads
           const now = Date.now();
           const last = lastDecodedRef.current;
           if (decodedText === last.text && now - last.t < 1500) return;
@@ -294,7 +293,6 @@ export default function App() {
 
     await stopScanner();
     setCameraIndex((i) => (i + 1) % cams.length);
-    // restart after state updates
     setTimeout(() => startScanner(), 60);
   }
 
@@ -303,21 +301,16 @@ export default function App() {
       stopScanner();
       return;
     }
-
-    // load cameras once when opening
     if (scanOpen && cameras.length === 0) {
       ensureCamerasLoaded();
     }
-
     startScanner();
     return () => stopScanner();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanOpen]);
 
-  // Also restart scanner if cameraIndex changes while open
   useEffect(() => {
     if (!scanOpen) return;
-    // restart to apply new camera
     (async () => {
       await stopScanner();
       setTimeout(() => startScanner(), 60);
@@ -336,6 +329,10 @@ export default function App() {
             transition: "opacity 420ms ease, transform 420ms ease",
           }}
         >
+          <div style={styles.welcomeLogoWrap}>
+            <img src="/sga-logo.png" alt="SGA" style={styles.welcomeLogo} />
+          </div>
+
           <div style={styles.h1}>{getGreeting()}</div>
           <div style={{ ...styles.p, marginBottom: 6 }}>{formatDateLong()}</div>
           <div style={styles.p}>Ready to scan.</div>
@@ -354,19 +351,10 @@ export default function App() {
           }}
           onClick={() => setBanner(null)}
         >
-          <div
-            style={{
-              whiteSpace: "pre-line",
-              textAlign: "center",
-              fontWeight: 900,
-              fontSize: 22,
-            }}
-          >
+          <div style={{ whiteSpace: "pre-line", textAlign: "center", fontWeight: 900, fontSize: 22 }}>
             {banner.text}
           </div>
-          <div style={{ marginTop: 12, opacity: 0.95, fontWeight: 800 }}>
-            Tap to dismiss
-          </div>
+          <div style={{ marginTop: 12, opacity: 0.95, fontWeight: 800 }}>Tap to dismiss</div>
         </div>
       )}
 
@@ -376,10 +364,7 @@ export default function App() {
             <div style={{ fontWeight: 900, fontSize: 13 }}>Scan</div>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <button
-                style={{
-                  ...styles.flipBtn,
-                  opacity: cameras.length > 1 ? 1 : 0.45,
-                }}
+                style={{ ...styles.flipBtn, opacity: cameras.length > 1 ? 1 : 0.45 }}
                 onClick={flipCamera}
                 title="Flip camera"
                 aria-label="Flip camera"
@@ -401,23 +386,20 @@ export default function App() {
       )}
 
       <div style={styles.top}>
-        <div style={styles.h1}>{title}</div>
+        <div style={styles.header}>
+          <img src="/sga-logo.png" alt="SGA" style={styles.logo} />
+          <div style={styles.h1}>{title}</div>
+        </div>
 
         <div style={styles.row}>
           <button
-            style={{
-              ...styles.chip,
-              background: mode === "events" ? "#111827" : "transparent",
-            }}
+            style={{ ...styles.chip, background: mode === "events" ? "#111827" : "transparent" }}
             onClick={() => setMode("events")}
           >
             Events
           </button>
           <button
-            style={{
-              ...styles.chip,
-              background: mode === "distribution" ? "#111827" : "transparent",
-            }}
+            style={{ ...styles.chip, background: mode === "distribution" ? "#111827" : "transparent" }}
             onClick={() => setMode("distribution")}
           >
             Distribution
@@ -464,10 +446,6 @@ export default function App() {
           <button style={styles.btnDanger} onClick={resetAll}>
             Reset
           </button>
-        </div>
-
-        <div style={{ marginTop: 10, fontSize: 12, opacity: 0.8 }}>
-          Export on Phone A → Import on Phone B to switch phones.
         </div>
       </div>
 
@@ -538,6 +516,12 @@ const styles = {
     borderRadius: 16,
     border: "1px solid rgba(255,255,255,0.08)",
   },
+  header: { display: "flex", alignItems: "center", gap: 12, marginBottom: 6 },
+  logo: { height: 50, width: 50, objectFit: "contain" },
+
+  welcomeLogoWrap: { display: "flex", justifyContent: "center", marginBottom: 10 },
+  welcomeLogo: { height: 80, width: 80, objectFit: "contain" },
+
   h1: { fontSize: 22, fontWeight: 900, marginBottom: 6 },
   p: { opacity: 0.9, marginBottom: 12, lineHeight: 1.35 },
   row: { display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginTop: 10 },
@@ -653,8 +637,5 @@ const styles = {
     padding: "2px 6px",
     borderRadius: 8,
   },
-  cornerBody: {
-    width: "100%",
-    height: 240,
-  },
+  cornerBody: { width: "100%", height: 240 },
 };
