@@ -315,29 +315,47 @@ export default function App() {
     }
   }
 
+  function extractStudentIdFromCode128(code) {
+    const raw = String(code ?? "").trim();
+
+    // Prefer a clean 7-digit run anywhere in the decoded text
+    const m7 = raw.match(/\b(\d{7})\b/);
+    if (m7) return m7[1];
+
+    // Some encoders wrap the number with non-digits; pull digits and try again
+    const digits = raw.replace(/\D/g, "");
+    if (digits.length === 7) return digits;
+
+    // Sometimes the barcode stores 6 digits; your app expects 7 (leading 0)
+    if (digits.length === 6) return "0" + digits;
+
+    // If it's longer, take the LAST 7 digits (common when prefixes are used)
+    if (digits.length > 7) return digits.slice(-7);
+
+    return "";
+  }
+
   function onDetected(result) {
     const code = result?.codeResult?.code;
     if (!code) return;
 
-    // require 2 quick confirmations to reduce misreads, but still feel fast
-    const now = Date.now();
-    const last = lastDetectedRef.current;
+    const id = extractStudentIdFromCode128(code);
+    console.log("Quagga detected:", code, "=>", id);
 
-    if (code === last.text && now - last.t < 900) {
-      last.streak += 1;
-    } else {
-      last.text = code;
-      last.t = now;
-      last.streak = 1;
+    if (!id) {
+      // We decoded *something* but couldn't find a usable student ID
+      showBanner("Barcode read, but ID not recognized", "bad", 1.6);
+      return;
     }
 
-    if (last.streak < 2) return;
+    // Cooldown so it doesn't spam repeats
+    const now = Date.now();
+    const last = lastDetectedRef.current;
+    if (id === last.text && now - last.t < 1500) return;
 
-    // cooldown so it doesn't spam
-    last.t = now;
-    last.streak = 0;
+    lastDetectedRef.current = { text: id, t: now, streak: 0 };
 
-    handleSubmit(code);
+    handleSubmit(id);
   }
 
   function startScanner() {
