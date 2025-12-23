@@ -695,6 +695,28 @@ const styles = {
     borderBottom: "1px solid rgba(255,255,255,0.08)",
   },
 
-  smallBtn: {
+    smallBtn: {
     border: "1px solid rgba(255,255,255,0.16)",
-    background: "#111827
+    background: "#111827",
+    color: "#e5e7eb",
+    fontWeight: 900,
+    fontSize: 14,
+    cursor: "pointer",
+    padding: "4px 8px",
+    borderRadius: 10,
+  },
+  xBtn: {
+    border: "none",
+    background: "transparent",
+    color: "#e5e7eb",
+    fontWeight: 900,
+    fontSize: 16,
+    cursor: "pointer",
+    padding: "2px 6px",
+    borderRadius: 8,
+  },
+  readerBody: {
+    width: "100%",
+    height: "100%",
+  },
+};
