@@ -3,6 +3,14 @@ import Quagga from "@ericblade/quagga2";
 import { db } from "./db";
 import { downloadCSV, parseCSV } from "./csv";
 
+/**
+ * Notes:
+ * - Designed for CODE_128 on small ID cards.
+ * - Uses Quagga2 "locate" mode + overlay (green boxes / red line), like the demo.
+ * - Scanner opens expanded by default for more pixels (higher success rate).
+ * - Flip camera cycles available video inputs by deviceId.
+ */
+
 function pad2(n) {
   return String(n).padStart(2, "0");
 }
@@ -45,16 +53,17 @@ export default function App() {
 
   // Scanner UI
   const [scanOpen, setScanOpen] = useState(false);
-  const [scannerExpanded, setScannerExpanded] = useState(true); // expanded by default (best for small ID cards)
+  const [scannerExpanded, setScannerExpanded] = useState(true); // default expanded for small IDs
 
-  // Camera flip (deviceId list)
-  const [cameras, setCameras] = useState([]); // [{deviceId,label}]
+  // Cameras (for flip)
+  const [videoInputs, setVideoInputs] = useState([]); // [{deviceId,label}]
   const [cameraIndex, setCameraIndex] = useState(0);
 
-  // Quagga refs
-  const quaggaActiveRef = useRef(false);
-  const lastDetectedRef = useRef({ code: "", t: 0 });
-  const viewportId = "quagga-viewport";
+  // Quagga lifecycle flags
+  const quaggaRunningRef = useRef(false);
+
+  // Debounce / confirm detections (reduces false reads)
+  const lastDetectedRef = useRef({ text: "", t: 0, streak: 0 });
 
   const title = useMemo(
     () => (mode === "events" ? "Events" : "Distribution"),
@@ -73,7 +82,7 @@ export default function App() {
     setTimeout(() => setScreen("app"), 350);
   }
 
-  // Welcome: 3 seconds then fade out (also tap anywhere)
+  // Welcome: 3 seconds then fade out (tap anywhere also dismisses)
   useEffect(() => {
     if (screen !== "welcome") return;
     setWelcomeStage("in");
@@ -95,7 +104,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen, mode]);
 
-  // Auto-submit on exactly 7 digits in Events mode
+  // Auto-submit on exactly 7 digits in Events mode (typing)
   useEffect(() => {
     const v = scan.trim();
     if (mode === "events" && /^\d{7}$/.test(v)) {
@@ -120,6 +129,7 @@ export default function App() {
       };
     });
 
+    // Replace current mode roster with imported rows
     await db.records.where({ mode }).delete();
 
     const toInsert = rows
@@ -195,6 +205,7 @@ export default function App() {
       return;
     }
 
+    // distribution: match ID or Name, mark first unreceived
     const v = value.trim().toLowerCase();
     const id = normalizeId(value);
     const matches = list.filter(
@@ -233,155 +244,207 @@ export default function App() {
     showBanner("Cleared all records.", "ok", 1.5);
   }
 
-  // -------- Quagga2 scanner --------
-  async function refreshCameras() {
+  // ---- Camera enumeration (for flip) ----
+  async function refreshVideoInputs() {
     try {
+      if (!navigator.mediaDevices?.enumerateDevices) return;
       const devices = await navigator.mediaDevices.enumerateDevices();
       const vids = devices.filter((d) => d.kind === "videoinput");
-      setCameras(vids.map((d) => ({ deviceId: d.deviceId, label: d.label || "Camera" })));
+      setVideoInputs(vids.map((d) => ({ deviceId: d.deviceId, label: d.label || "Camera" })));
       return vids;
     } catch {
-      setCameras([]);
-      return [];
+      // ignore
     }
+  }
+
+  // ---- QUAGGA ----
+  function quaggaConfig() {
+    const useDeviceId = videoInputs?.[cameraIndex]?.deviceId;
+
+    // Expanded scanner gives more pixels => higher decode success
+    // Also we scan a center horizontal band (name above / ID text below).
+    const area = scannerExpanded
+      ? { top: "30%", right: "5%", left: "5%", bottom: "30%" }
+      : { top: "35%", right: "5%", left: "5%", bottom: "35%" };
+
+    const constraints = useDeviceId
+      ? { deviceId: { exact: useDeviceId } }
+      : { facingMode: "environment" };
+
+    return {
+      inputStream: {
+        type: "LiveStream",
+        target: document.querySelector("#quagga-view"),
+        constraints: {
+          ...constraints,
+          width: { ideal: scannerExpanded ? 1920 : 1280 },
+          height: { ideal: scannerExpanded ? 1080 : 720 },
+        },
+        area,
+      },
+      locator: {
+        locate: true,
+        halfSample: true,
+        patchSize: "medium",
+      },
+      decoder: {
+        readers: ["code_128_reader"],
+      },
+      locate: true,
+    };
   }
 
   function stopScanner() {
     try {
-      if (quaggaActiveRef.current) {
-        Quagga.offDetected(onDetected);
-        Quagga.stop();
-      }
+      if (!quaggaRunningRef.current) return;
+      Quagga.offDetected(onDetected);
+      Quagga.offProcessed(onProcessed);
+      Quagga.stop();
     } catch {
       // ignore
     } finally {
-      quaggaActiveRef.current = false;
+      quaggaRunningRef.current = false;
+      lastDetectedRef.current = { text: "", t: 0, streak: 0 };
     }
   }
 
   function onDetected(result) {
-    const code = result?.codeResult?.code ? String(result.codeResult.code).trim() : "";
+    const code = result?.codeResult?.code;
     if (!code) return;
 
+    // Confirm 2 same reads close together to reduce misreads
     const now = Date.now();
     const last = lastDetectedRef.current;
-    if (code === last.code && now - last.t < 1200) return;
-    lastDetectedRef.current = { code, t: now };
+
+    if (code === last.text && now - last.t < 900) {
+      last.streak += 1;
+    } else {
+      last.text = code;
+      last.t = now;
+      last.streak = 1;
+    }
+
+    // Need 2 confirmations
+    if (last.streak < 2) return;
+
+    // Cooldown so it doesn't spam
+    last.t = now;
+    last.streak = 0;
 
     handleSubmit(code);
   }
 
-  async function startScanner() {
-    if (quaggaActiveRef.current) return;
+  function onProcessed(result) {
+    try {
+      const ctx = Quagga.canvas?.ctx?.overlay;
+      const canvas = Quagga.canvas?.dom?.overlay;
+      if (!ctx || !canvas) return;
 
-    if (!cameras.length) {
-      await refreshCameras();
-    }
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    const picked = cameras.length ? cameras[Math.min(cameraIndex, cameras.length - 1)] : null;
-
-    const target = document.getElementById(viewportId);
-    if (!target) return;
-
-    target.innerHTML = "";
-
-    const constraints = picked?.deviceId
-      ? { deviceId: { exact: picked.deviceId } }
-      : { facingMode: "environment" };
-
-    return new Promise((resolve, reject) => {
-      Quagga.init(
-        {
-          inputStream: {
-            type: "LiveStream",
-            target,
-            constraints: {
-              ...constraints,
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
-              aspectRatio: { ideal: 1.777 },
-            },
-            area: {
-              top: "38%",
-              right: "6%",
-              left: "6%",
-              bottom: "38%",
-            },
-          },
-          locator: {
-            patchSize: "medium",
-            halfSample: true,
-          },
-          numOfWorkers: navigator.hardwareConcurrency ? Math.min(4, navigator.hardwareConcurrency) : 2,
-          frequency: 10,
-          decoder: {
-            readers: ["code_128_reader"],
-            multiple: false,
-          },
-          locate: true,
-        },
-        (err) => {
-          if (err) {
-            reject(err);
-            return;
-          }
-          Quagga.onDetected(onDetected);
-          Quagga.start();
-          quaggaActiveRef.current = true;
-          resolve();
+      if (result) {
+        if (result.boxes) {
+          result.boxes
+            .filter((b) => b !== result.box)
+            .forEach((box) => {
+              Quagga.ImageDebug.drawPath(box, { x: 0, y: 1 }, ctx, {
+                color: "rgba(0,255,0,0.35)",
+                lineWidth: 2,
+              });
+            });
         }
-      );
-    });
+
+        if (result.box) {
+          Quagga.ImageDebug.drawPath(result.box, { x: 0, y: 1 }, ctx, {
+            color: "rgba(0,255,0,0.95)",
+            lineWidth: 3,
+          });
+        }
+
+        if (result.line) {
+          Quagga.ImageDebug.drawPath(result.line, { x: "x", y: "y" }, ctx, {
+            color: "rgba(255,0,0,0.9)",
+            lineWidth: 3,
+          });
+        }
+      }
+    } catch {
+      // ignore
+    }
   }
 
+  async function startScanner() {
+    try {
+      if (quaggaRunningRef.current) return;
+
+      // Important: enumerate AFTER permission; but it helps for flip on most devices.
+      await refreshVideoInputs();
+
+      const cfg = quaggaConfig();
+
+      Quagga.init(cfg, (err) => {
+        if (err) {
+          console.error(err);
+          showBanner("Camera scan failed. Try reloading / HTTPS.", "bad", 2.0);
+          setScanOpen(false);
+          return;
+        }
+
+        Quagga.onProcessed(onProcessed);
+        Quagga.onDetected(onDetected);
+        Quagga.start();
+        quaggaRunningRef.current = true;
+      });
+    } catch (e) {
+      console.error(e);
+      showBanner("Camera scan failed. Try reloading / HTTPS.", "bad", 2.0);
+      setScanOpen(false);
+    }
+  }
+
+  function flipCamera() {
+    if (!videoInputs || videoInputs.length <= 1) return;
+    stopScanner();
+    setCameraIndex((i) => (i + 1) % videoInputs.length);
+  }
+
+  function toggleExpanded() {
+    stopScanner();
+    setScannerExpanded((v) => !v);
+  }
+
+  // Start/stop based on scanOpen
   useEffect(() => {
     if (!scanOpen) {
       stopScanner();
       return;
     }
-    (async () => {
-      try {
-        await startScanner();
-        await refreshCameras();
-      } catch (e) {
-        showBanner("Camera scan not available. Try the HTTPS (Vercel) link.", "bad", 2.2);
-        stopScanner();
-        setScanOpen(false);
-      }
-    })();
-
-    return () => stopScanner();
+    // Start after DOM has rendered the target container
+    const t = setTimeout(() => startScanner(), 80);
+    return () => {
+      clearTimeout(t);
+      stopScanner();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanOpen]);
 
+  // Restart when cameraIndex changes (flip)
   useEffect(() => {
     if (!scanOpen) return;
-    (async () => {
-      stopScanner();
-      try {
-        await startScanner();
-      } catch {
-        showBanner("Couldn’t switch camera.", "bad", 1.6);
-      }
-    })();
+    const t = setTimeout(() => startScanner(), 80);
+    return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraIndex]);
 
+  // Restart when expanded toggles (size/area/constraints change)
   useEffect(() => {
     if (!scanOpen) return;
-    const t = setTimeout(() => {
-      stopScanner();
-      startScanner().catch(() => {});
-    }, 120);
+    const t = setTimeout(() => startScanner(), 120);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scannerExpanded]);
 
-  function flipCamera() {
-    if (cameras.length <= 1) return;
-    setCameraIndex((i) => (i + 1) % cameras.length);
-  }
-
+  // ---- UI ----
   if (screen === "welcome") {
     return (
       <div style={styles.page} onClick={dismissWelcome}>
@@ -413,10 +476,19 @@ export default function App() {
           }}
           onClick={() => setBanner(null)}
         >
-          <div style={{ whiteSpace: "pre-line", textAlign: "center", fontWeight: 900, fontSize: 22 }}>
+          <div
+            style={{
+              whiteSpace: "pre-line",
+              textAlign: "center",
+              fontWeight: 900,
+              fontSize: 22,
+            }}
+          >
             {banner.text}
           </div>
-          <div style={{ marginTop: 12, opacity: 0.95, fontWeight: 800 }}>Tap to dismiss</div>
+          <div style={{ marginTop: 12, opacity: 0.95, fontWeight: 800 }}>
+            Tap to dismiss
+          </div>
         </div>
       )}
 
@@ -426,7 +498,7 @@ export default function App() {
             <div style={{ fontWeight: 900, fontSize: 13 }}>Scan</div>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <button
-                style={{ ...styles.smallBtn, opacity: cameras.length > 1 ? 1 : 0.45 }}
+                style={{ ...styles.smallBtn, opacity: videoInputs.length > 1 ? 1 : 0.45 }}
                 onClick={flipCamera}
                 title="Flip camera"
                 aria-label="Flip camera"
@@ -435,7 +507,7 @@ export default function App() {
               </button>
               <button
                 style={styles.smallBtn}
-                onClick={() => setScannerExpanded((v) => !v)}
+                onClick={toggleExpanded}
                 title="Resize"
                 aria-label="Resize"
               >
@@ -452,10 +524,8 @@ export default function App() {
             </div>
           </div>
 
-          <div style={styles.readerBody}>
-            <div id={viewportId} style={styles.viewport} />
-            <div style={styles.aimGuide} />
-          </div>
+          <div id="quagga-view" style={styles.readerBody} />
+          <div style={styles.scanHintBand} />
         </div>
       )}
 
@@ -499,7 +569,7 @@ export default function App() {
           <button
             style={styles.btnSecondary}
             onClick={() => {
-              setScannerExpanded(true);
+              setScannerExpanded(true); // best for small ID cards
               setScanOpen((v) => !v);
             }}
           >
@@ -523,6 +593,7 @@ export default function App() {
           <button style={styles.btnSecondary} onClick={exportCSV}>
             Export CSV
           </button>
+
           <button style={styles.btnDanger} onClick={resetAll}>
             Reset
           </button>
@@ -550,7 +621,9 @@ export default function App() {
                 <button
                   key={r.id}
                   style={styles.rowItem}
-                  onClick={() => handleSubmit(mode === "events" ? r.studentId : r.studentId || r.name)}
+                  onClick={() =>
+                    handleSubmit(mode === "events" ? r.studentId : r.studentId || r.name)
+                  }
                 >
                   <div style={{ fontWeight: 900 }}>{r.name || "(No name)"}</div>
                   <div style={{ opacity: 0.9, fontSize: 13 }}>
@@ -684,7 +757,7 @@ const styles = {
     position: "fixed",
     right: 12,
     bottom: 12,
-    width: 280,
+    width: 290,
     height: 320,
     background: "#0b1220",
     border: "1px solid rgba(255,255,255,0.14)",
@@ -693,6 +766,7 @@ const styles = {
     zIndex: 40,
     boxShadow: "0 12px 32px rgba(0,0,0,0.35)",
   },
+
   bigScanner: {
     position: "fixed",
     left: 12,
@@ -706,6 +780,7 @@ const styles = {
     zIndex: 40,
     boxShadow: "0 12px 32px rgba(0,0,0,0.35)",
   },
+
   cornerHeader: {
     display: "flex",
     alignItems: "center",
@@ -713,6 +788,7 @@ const styles = {
     padding: "8px 10px",
     borderBottom: "1px solid rgba(255,255,255,0.08)",
   },
+
   smallBtn: {
     border: "1px solid rgba(255,255,255,0.16)",
     background: "#111827",
@@ -733,25 +809,21 @@ const styles = {
     padding: "2px 6px",
     borderRadius: 8,
   },
+
   readerBody: {
-    position: "relative",
-    width: "100%",
-    height: "calc(100% - 42px)",
-    background: "#000",
-  },
-  viewport: {
     width: "100%",
     height: "100%",
+    position: "relative",
   },
-  aimGuide: {
+
+  // subtle band hint (doesn't tell the user what to do, just helps aim)
+  scanHintBand: {
     position: "absolute",
-    left: "6%",
-    right: "6%",
-    top: "38%",
-    bottom: "38%",
-    border: "2px solid rgba(34,197,94,0.7)",
-    borderRadius: 12,
+    left: "5%",
+    right: "5%",
+    top: "45%",
+    height: 2,
+    background: "rgba(255,255,255,0.10)",
     pointerEvents: "none",
-    boxShadow: "0 0 0 9999px rgba(0,0,0,0.18) inset",
   },
 };
