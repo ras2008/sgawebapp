@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Html5Qrcode } from "html5-qrcode";
+import { Html5Qrcode, Html5QrcodeSupportedFormats } from "html5-qrcode";
 import { db } from "./db";
 import { downloadCSV, parseCSV } from "./csv";
 
@@ -257,17 +257,18 @@ export default function App() {
 
       // Tighter scan box = faster lock
       await q.start(
-        picked?.id || { facingMode: "environment" },
-        { fps: 15, qrbox: { width: 130, height: 130 }, aspectRatio: 1.0 },
-        (decodedText) => {
-          const now = Date.now();
-          const last = lastDecodedRef.current;
-          if (decodedText === last.text && now - last.t < 1500) return;
-          lastDecodedRef.current = { text: decodedText, t: now };
-          handleSubmit(decodedText);
-        },
-        () => {}
-      );
+  picked?.id || { facingMode: "environment" },
+  {
+    fps: 24,
+    qrbox: { width: 260, height: 110 },
+    formatsToSupport: [Html5QrcodeSupportedFormats.CODE_128],
+    showTorchButtonIfSupported: true,
+    showZoomSliderIfSupported: true,
+    defaultZoomValueIfSupported: 2,
+  },
+  (decodedText) => { /* your existing handler */ },
+  () => {}
+);
     } catch (e) {
       showBanner("Camera scan not available. Use typing.", "bad", 2);
       stopScanner();
