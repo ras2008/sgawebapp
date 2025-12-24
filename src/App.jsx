@@ -510,12 +510,39 @@ export default function App() {
 
   if (screen === "welcome") {
     return (
-      <div style={styles.welcomePage} onClick={dismissWelcome}>
+      <div id="welcome-page" style={styles.welcomePage} onClick={dismissWelcome}>
         <style>{`
           @keyframes float1 { 0% { transform: translate3d(-10px, 0, 0) scale(1); } 50% { transform: translate3d(12px, -14px, 0) scale(1.08);} 100% { transform: translate3d(-10px, 0, 0) scale(1);} }
           @keyframes float2 { 0% { transform: translate3d(10px, 0, 0) scale(1); } 50% { transform: translate3d(-16px, 12px, 0) scale(1.06);} 100% { transform: translate3d(10px, 0, 0) scale(1);} }
           @keyframes pop { 0% { transform: translateY(14px) scale(.98); opacity: 0; } 100% { transform: translateY(0px) scale(1); opacity: 1; } }
           @keyframes logoPulse { 0% { transform: scale(1); } 50% { transform: scale(1.04); } 100% { transform: scale(1); } }
+
+          /* Mobile welcome layout fixes */
+          #welcome-page {
+            min-height: 100dvh;
+          }
+
+          #welcome-card {
+            transform-origin: center center;
+          }
+
+          @media (max-width: 420px) {
+            #welcome-card {
+              width: 92vw !important;
+              padding: 16px !important;
+              border-radius: 16px !important;
+            }
+            #welcome-card img {
+              width: 84px !important;
+              height: 84px !important;
+            }
+          }
+
+          @media (max-height: 740px) {
+            #welcome-card {
+              padding: 16px !important;
+            }
+          }
         `}</style>
 
         <div aria-hidden style={styles.welcomeBg}>
@@ -524,6 +551,7 @@ export default function App() {
         </div>
 
         <div
+          id="welcome-card"
           style={{
             ...styles.welcomeCard,
             opacity: welcomeStage === "in" ? 1 : 0,
@@ -802,7 +830,7 @@ export default function App() {
 
 const styles = {
   page: {
-    minHeight: "100vh",
+    minHeight: "100dvh",
     background: "#0f172a",
     color: "#e5e7eb",
     fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial",
@@ -810,8 +838,10 @@ const styles = {
   },
 
   welcomePage: {
-    minHeight: "100vh",
+    minHeight: "100dvh",
     padding: 14,
+    paddingTop: "calc(14px + env(safe-area-inset-top))",
+    paddingBottom: "calc(14px + env(safe-area-inset-bottom))",
     color: "#e5e7eb",
     fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial",
     background:
@@ -848,7 +878,7 @@ const styles = {
     animation: "float2 8s ease-in-out infinite",
   },
   welcomeCard: {
-    width: "min(560px, 92vw)",
+    width: "min(520px, 92vw)",
     padding: 20,
     borderRadius: 18,
     border: "1px solid rgba(255,255,255,0.10)",
