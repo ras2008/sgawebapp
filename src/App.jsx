@@ -543,6 +543,23 @@ export default function App() {
               padding: 16px !important;
             }
           }
+
+          /* iOS Safari/PWA viewport centering */
+          html, body { height: 100%; }
+          #welcome-page {
+            height: 100vh;
+            height: 100svh;
+            height: 100dvh;
+            min-height: -webkit-fill-available;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          }
+
+          /* Slightly lift the card on tall iPhones so it feels centered */
+          @media (max-width: 430px) and (min-height: 800px) {
+            #welcome-card { margin-top: -18px !important; }
+          }
         `}</style>
 
         <div aria-hidden style={styles.welcomeBg}>
@@ -846,8 +863,9 @@ const styles = {
     fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial",
     background:
       "radial-gradient(1200px 800px at 20% 10%, rgba(34,197,94,0.20), transparent 55%), radial-gradient(900px 700px at 85% 30%, rgba(59,130,246,0.22), transparent 55%), #0b1020",
-    display: "grid",
-    placeItems: "center",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
     position: "relative",
     overflow: "hidden",
   },
