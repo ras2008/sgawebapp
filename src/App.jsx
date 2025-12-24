@@ -71,11 +71,6 @@ export default function App() {
   // Quagga lifecycle flags
   const quaggaRunningRef = useRef(false);
 
-  // Zoom support (best-effort)
-  const zoomTrackRef = useRef(null);
-  const zoomCapsRef = useRef(null);
-  const [zoomSupported, setZoomSupported] = useState(false);
-  const [zoom, setZoom] = useState(1);
 
   // Debounce detections
   const lastDetectedRef = useRef({ text: "", t: 0 });
@@ -109,19 +104,6 @@ export default function App() {
     bannerTimer.current = setTimeout(() => setBanner(null), seconds * 1000);
   }
 
-  function applyZoom(next) {
-    const track = zoomTrackRef.current;
-    const caps = zoomCapsRef.current;
-    if (!track || !caps?.zoom) return;
-
-    const z = Math.max(caps.zoom.min, Math.min(caps.zoom.max, Number(next)));
-    setZoom(z);
-    try {
-      track.applyConstraints({ advanced: [{ zoom: z }] });
-    } catch {
-      // ignore
-    }
-  }
 
   function dismissWelcome() {
     if (screen !== "welcome") return;
@@ -346,10 +328,6 @@ export default function App() {
     } finally {
       quaggaRunningRef.current = false;
       lastDetectedRef.current = { text: "", t: 0 };
-      zoomTrackRef.current = null;
-      zoomCapsRef.current = null;
-      setZoomSupported(false);
-      setZoom(1);
       setScannerStatus("idle");
     }
   }
@@ -461,16 +439,16 @@ export default function App() {
             target: targetEl,
             constraints: {
               ...constraints,
-              width: { ideal: 1920 },
-              height: { ideal: 1080 },
-              frameRate: { ideal: 30, max: 60 },
+              width: { ideal: 640 },
+              height: { ideal: 480 },
+              frameRate: { ideal: 30, max: 30 },
             },
-            area: { top: "25%", right: "0%", left: "0%", bottom: "25%" },
+            // area removed to allow full frame scanning
           },
           locator: {
             locate: true,
             halfSample: false,
-            patchSize: "x-small",
+            patchSize: "medium",
           },
           decoder: {
             readers: ["code_39_reader"],
@@ -494,29 +472,6 @@ export default function App() {
 
           const list = await refreshVideoInputs();
           if (list?.length && cameraIndex >= list.length) setCameraIndex(0);
-
-          setTimeout(() => {
-            try {
-              const video = document.querySelector("#quagga-view video");
-              const stream = video?.srcObject;
-              const track = stream?.getVideoTracks?.()[0];
-              const caps = track?.getCapabilities?.();
-              zoomTrackRef.current = track || null;
-              zoomCapsRef.current = caps || null;
-
-              if (caps?.zoom) {
-                setZoomSupported(true);
-                const initial = Math.min(caps.zoom.max, Math.max(caps.zoom.min, 2));
-                applyZoom(initial);
-              } else {
-                setZoomSupported(false);
-                setZoom(1);
-              }
-            } catch {
-              setZoomSupported(false);
-              setZoom(1);
-            }
-          }, 250);
         }
       );
     } catch (e) {
@@ -640,24 +595,6 @@ export default function App() {
               </span>
             </div>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              {zoomSupported ? (
-                <div style={styles.zoomWrap} title="Zoom">
-                  <span style={{ fontWeight: 900, fontSize: 12, opacity: 0.85 }}>
-                    🔎
-                  </span>
-                  <input
-                    type="range"
-                    min={zoomCapsRef.current?.zoom?.min ?? 1}
-                    max={zoomCapsRef.current?.zoom?.max ?? 3}
-                    step={0.1}
-                    value={zoom}
-                    onChange={(e) => applyZoom(e.target.value)}
-                    style={styles.zoomRange}
-                    aria-label="Zoom"
-                  />
-                </div>
-              ) : null}
-
               <button
                 style={{
                   ...styles.smallBtn,
@@ -1121,16 +1058,6 @@ const styles = {
     borderBottom: "1px solid rgba(255,255,255,0.08)",
   },
 
-  zoomWrap: {
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    padding: "4px 8px",
-    borderRadius: 10,
-    border: "1px solid rgba(255,255,255,0.14)",
-    background: "rgba(17,24,39,0.75)",
-  },
-  zoomRange: { width: 120 },
 
   smallBtn: {
     border: "1px solid rgba(255,255,255,0.16)",
