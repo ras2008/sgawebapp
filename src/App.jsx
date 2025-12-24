@@ -4,11 +4,13 @@ import { db } from "./db";
 import { downloadCSV, parseCSV } from "./csv";
 
 /**
+ * SGA PWA — App.jsx (CODE 39 ONLY)
+ *
  * Notes:
- * - Designed for CODE_128 on small ID cards.
- * - Uses Quagga2 "locate" mode + overlay (green boxes / red line), like the demo.
- * - Scanner opens expanded by default for more pixels (higher success rate).
- * - Flip camera cycles available video inputs by deviceId.
+ * - Scanner configured for Code 39 ONLY (Quagga2: code_39_reader).
+ * - Includes: search (name/ID), progress pills w/ bar + remaining, offline indicator, zoom slider (if supported).
+ * - Camera does NOT auto-open on launch; user taps "Camera Scan".
+ * - Data persists locally via IndexedDB (Dexie). Offline use works after first load.
  */
 
 function pad2(n) {
@@ -48,12 +50,17 @@ export default function App() {
   const [records, setRecords] = useState([]);
   const [scan, setScan] = useState("");
 
+  const [query, setQuery] = useState("");
+  const [isOnline, setIsOnline] = useState(
+    typeof navigator !== "undefined" ? navigator.onLine : true
+  );
+
   const [banner, setBanner] = useState(null); // {text, type}
   const bannerTimer = useRef(null);
 
   // Scanner UI
   const [scanOpen, setScanOpen] = useState(false);
-  const [scannerStatus, setScannerStatus] = useState("idle");
+  const [scannerStatus, setScannerStatus] = useState("idle"); // idle | starting | running | error
   const processedCountRef = useRef(0);
   const lastBoxRef = useRef(0);
 
@@ -64,13 +71,37 @@ export default function App() {
   // Quagga lifecycle flags
   const quaggaRunningRef = useRef(false);
 
-  // Debounce / confirm detections (reduces false reads)
-  const lastDetectedRef = useRef({ text: "", t: 0, streak: 0 });
+  // Zoom support (best-effort)
+  const zoomTrackRef = useRef(null);
+  const zoomCapsRef = useRef(null);
+  const [zoomSupported, setZoomSupported] = useState(false);
+  const [zoom, setZoom] = useState(1);
+
+  // Debounce detections
+  const lastDetectedRef = useRef({ text: "", t: 0 });
 
   const title = useMemo(
     () => (mode === "events" ? "Events" : "Distribution"),
     [mode]
   );
+
+  const totalCount = records.length;
+  const doneCount = useMemo(() => {
+    if (mode === "events") return records.filter((r) => r.scanned).length;
+    return records.filter((r) => r.received).length;
+  }, [records, mode]);
+  const remainingCount = Math.max(0, totalCount - doneCount);
+  const progressPct = totalCount ? Math.round((doneCount / totalCount) * 100) : 0;
+
+  const filteredRecords = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return records;
+    return records.filter((r) => {
+      const name = String(r.name ?? "").toLowerCase();
+      const id = String(r.studentId ?? "").toLowerCase();
+      return name.includes(q) || id.includes(q);
+    });
+  }, [records, query]);
 
   function showBanner(text, type = "ok", seconds = 1.5) {
     setBanner({ text, type });
@@ -78,10 +109,26 @@ export default function App() {
     bannerTimer.current = setTimeout(() => setBanner(null), seconds * 1000);
   }
 
+  function applyZoom(next) {
+    const track = zoomTrackRef.current;
+    const caps = zoomCapsRef.current;
+    if (!track || !caps?.zoom) return;
+
+    const z = Math.max(caps.zoom.min, Math.min(caps.zoom.max, Number(next)));
+    setZoom(z);
+    try {
+      track.applyConstraints({ advanced: [{ zoom: z }] });
+    } catch {
+      // ignore
+    }
+  }
+
   function dismissWelcome() {
     if (screen !== "welcome") return;
     setWelcomeStage("out");
-    setTimeout(() => setScreen("app"), 350);
+    setTimeout(() => {
+      setScreen("app");
+    }, 420);
   }
 
   // Welcome: 3 seconds then fade out (tap anywhere also dismisses)
@@ -89,7 +136,9 @@ export default function App() {
     if (screen !== "welcome") return;
     setWelcomeStage("in");
     const t1 = setTimeout(() => setWelcomeStage("out"), 2600);
-    const t2 = setTimeout(() => setScreen("app"), 3000);
+    const t2 = setTimeout(() => {
+      setScreen("app");
+    }, 3000);
     return () => {
       clearTimeout(t1);
       clearTimeout(t2);
@@ -105,6 +154,24 @@ export default function App() {
     if (screen === "app") loadRecords();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen, mode]);
+
+  useEffect(() => {
+    function onOn() {
+      setIsOnline(true);
+      showBanner("Back online", "ok", 0.8);
+    }
+    function onOff() {
+      setIsOnline(false);
+      showBanner("Offline mode", "bad", 1.0);
+    }
+    window.addEventListener("online", onOn);
+    window.addEventListener("offline", onOff);
+    return () => {
+      window.removeEventListener("online", onOn);
+      window.removeEventListener("offline", onOff);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Auto-submit on exactly 7 digits in Events mode (typing)
   useEffect(() => {
@@ -131,7 +198,6 @@ export default function App() {
       };
     });
 
-    // Replace current mode roster with imported rows
     await db.records.where({ mode }).delete();
 
     const toInsert = rows
@@ -251,9 +317,8 @@ export default function App() {
     showBanner("Cleared all records.", "ok", 1.5);
   }
 
-    // ---- QUAGGA2 LIVE SCANNER (demo-style: locate + overlay boxes) ----
+  // ---- QUAGGA2 LIVE SCANNER (CODE 39 ONLY) ----
 
-  // Best-effort: refresh cameras for flip. (Labels appear after permission.)
   async function refreshVideoInputs() {
     try {
       if (!navigator.mediaDevices?.enumerateDevices) return [];
@@ -280,111 +345,108 @@ export default function App() {
       // ignore
     } finally {
       quaggaRunningRef.current = false;
-      lastDetectedRef.current = { text: "", t: 0, streak: 0 };
+      lastDetectedRef.current = { text: "", t: 0 };
+      zoomTrackRef.current = null;
+      zoomCapsRef.current = null;
+      setZoomSupported(false);
+      setZoom(1);
+      setScannerStatus("idle");
     }
   }
 
-  function extractStudentIdFromCode128(code) {
-    const raw = String(code ?? "").trim();
+  function extractStudentIdFromBarcode(code) {
+    const raw = String(code ?? "").trim().replace(/^\*+|\*+$/g, "");
 
-    // Prefer a clean 7-digit run anywhere in the decoded text
     const m7 = raw.match(/\b(\d{7})\b/);
     if (m7) return m7[1];
 
-    // Pull digits only
     const digits = raw.replace(/\D/g, "");
 
     if (digits.length === 7) return digits;
     if (digits.length === 6) return "0" + digits;
     if (digits.length > 7) return digits.slice(-7);
 
-    return "";
+    return raw;
   }
 
   function onDetected(result) {
     const code = result?.codeResult?.code;
     if (!code) return;
 
-    const id = extractStudentIdFromCode128(code);
-    console.log("Quagga detected:", code, "=>", id);
+    const id = extractStudentIdFromBarcode(code);
+    if (!id) return;
 
-    if (!id) {
-      showBanner("Barcode read, but ID not recognized", "bad", 1.6);
-      return;
-    }
-
-    // Cooldown so it doesn't spam repeats
     const now = Date.now();
     const last = lastDetectedRef.current;
-    if (id === last.text && now - last.t < 1500) return;
+    if (id === last.text && now - last.t < 1400) return;
 
-    lastDetectedRef.current = { text: id, t: now, streak: 0 };
+    lastDetectedRef.current = { text: id, t: now };
     handleSubmit(id);
   }
 
   function onProcessed(result) {
-  try {
-    processedCountRef.current += 1;
-    if (scannerStatus !== "running") setScannerStatus("running");
+    try {
+      processedCountRef.current += 1;
+      if (scannerStatus !== "running") setScannerStatus("running");
 
-    const ctx = Quagga.canvas?.ctx?.overlay;
-    const canvas = Quagga.canvas?.dom?.overlay;
-    if (!ctx || !canvas) return;
+      const ctx = Quagga.canvas?.ctx?.overlay;
+      const canvas = Quagga.canvas?.dom?.overlay;
+      if (!ctx || !canvas) return;
 
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    if (result) {
-      if (result.boxes) {
-        result.boxes
-          .filter((b) => b !== result.box)
-          .forEach((box) => {
-            Quagga.ImageDebug.drawPath(box, { x: 0, y: 1 }, ctx, {
-              color: "rgba(0,255,0,0.35)",
-              lineWidth: 2,
+      if (result) {
+        if (result.boxes) {
+          result.boxes
+            .filter((b) => b !== result.box)
+            .forEach((box) => {
+              Quagga.ImageDebug.drawPath(box, { x: 0, y: 1 }, ctx, {
+                color: "rgba(0,255,0,0.35)",
+                lineWidth: 2,
+              });
             });
+        }
+
+        if (result.box) {
+          Quagga.ImageDebug.drawPath(result.box, { x: 0, y: 1 }, ctx, {
+            color: "rgba(0,255,0,0.9)",
+            lineWidth: 3,
           });
-      }
 
-      if (result.box) {
-        Quagga.ImageDebug.drawPath(result.box, { x: 0, y: 1 }, ctx, {
-          color: "rgba(0,255,0,0.9)",
-          lineWidth: 3,
-        });
+          const now = Date.now();
+          if (now - lastBoxRef.current > 1200) {
+            lastBoxRef.current = now;
+            showBanner("Locked on barcode…", "ok", 0.6);
+          }
+        }
 
-        // show "lock" feedback occasionally (so you KNOW it's seeing the barcode)
-        const now = Date.now();
-        if (now - lastBoxRef.current > 1200) {
-          lastBoxRef.current = now;
-          showBanner("Locked on barcode…", "ok", 0.7);
+        if (result.line) {
+          Quagga.ImageDebug.drawPath(result.line, { x: "x", y: "y" }, ctx, {
+            color: "rgba(255,0,0,0.9)",
+            lineWidth: 3,
+          });
+        }
+
+        if (result.codeResult?.code) {
+          onDetected({ codeResult: { code: result.codeResult.code } });
         }
       }
-
-      if (result.line) {
-        Quagga.ImageDebug.drawPath(result.line, { x: "x", y: "y" }, ctx, {
-          color: "rgba(255,0,0,0.9)",
-          lineWidth: 3,
-        });
-      }
-
-      // SUPER IMPORTANT: if a decode exists here, force-submit it
-      if (result.codeResult?.code) {
-        console.log("codeResult in onProcessed:", result.codeResult.code);
-        onDetected({ codeResult: { code: result.codeResult.code } });
-      }
+    } catch {
+      // ignore
     }
-  } catch {
-    // ignore
   }
-}
 
   function startScanner() {
     setScannerStatus("starting");
-    showBanner("Starting camera…", "ok", 0.8);
     try {
       if (quaggaRunningRef.current) return;
 
       const targetEl = document.querySelector("#quagga-view");
-      if (!targetEl) return;
+      if (!targetEl) {
+        setScannerStatus("error");
+        showBanner("Scanner mount missing (#quagga-view)", "bad", 2.0);
+        return;
+      }
 
       const useDeviceId = videoInputs?.[cameraIndex]?.deviceId;
       const constraints = useDeviceId
@@ -401,18 +463,17 @@ export default function App() {
               ...constraints,
               width: { ideal: 1920 },
               height: { ideal: 1080 },
+              frameRate: { ideal: 30, max: 60 },
             },
-            // Full frame hunt like the demo
-            area: { top: "0%", right: "0%", left: "0%", bottom: "0%" },
+            area: { top: "25%", right: "0%", left: "0%", bottom: "25%" },
           },
           locator: {
             locate: true,
-            // More accurate for small Code128
             halfSample: false,
-            patchSize: "small",
+            patchSize: "x-small",
           },
           decoder: {
-            readers: ["code_128_reader"],
+            readers: ["code_39_reader"],
           },
           locate: true,
         },
@@ -420,7 +481,7 @@ export default function App() {
           if (err) {
             console.error(err);
             setScannerStatus("error");
-            showBanner("Camera scan failed. Try reloading / HTTPS.", "bad", 2.0);
+            showBanner("Camera scan failed. Try HTTPS / permissions.", "bad", 2.0);
             setScanOpen(false);
             return;
           }
@@ -429,17 +490,39 @@ export default function App() {
           Quagga.onDetected(onDetected);
           Quagga.start();
           setScannerStatus("running");
-          showBanner("Scanner ready", "ok", 0.7);
           quaggaRunningRef.current = true;
 
-          // after permissions, enumerate so flip works more reliably
           const list = await refreshVideoInputs();
           if (list?.length && cameraIndex >= list.length) setCameraIndex(0);
+
+          setTimeout(() => {
+            try {
+              const video = document.querySelector("#quagga-view video");
+              const stream = video?.srcObject;
+              const track = stream?.getVideoTracks?.()[0];
+              const caps = track?.getCapabilities?.();
+              zoomTrackRef.current = track || null;
+              zoomCapsRef.current = caps || null;
+
+              if (caps?.zoom) {
+                setZoomSupported(true);
+                const initial = Math.min(caps.zoom.max, Math.max(caps.zoom.min, 2));
+                applyZoom(initial);
+              } else {
+                setZoomSupported(false);
+                setZoom(1);
+              }
+            } catch {
+              setZoomSupported(false);
+              setZoom(1);
+            }
+          }, 250);
         }
       );
     } catch (e) {
       console.error(e);
-      showBanner("Camera scan failed. Try reloading / HTTPS.", "bad", 2.0);
+      setScannerStatus("error");
+      showBanner("Camera scan failed. Try HTTPS / permissions.", "bad", 2.0);
       setScanOpen(false);
     }
   }
@@ -450,7 +533,6 @@ export default function App() {
     setCameraIndex((i) => (i + 1) % videoInputs.length);
   }
 
-  // Start/stop scanner
   useEffect(() => {
     if (!scanOpen) {
       stopScanner();
@@ -464,54 +546,56 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanOpen]);
 
-  // Restart on flip
   useEffect(() => {
     if (!scanOpen) return;
     const t = setTimeout(() => startScanner(), 80);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraIndex]);
-  // ---- UI ----
-  // ---- UI ----
-if (screen === "welcome") {
-  return (
-    <div style={styles.welcomePage} onClick={dismissWelcome}>
-      <style>{`
-        @keyframes float1 { 0% { transform: translate3d(-10px, 0, 0) scale(1); } 50% { transform: translate3d(12px, -14px, 0) scale(1.08);} 100% { transform: translate3d(-10px, 0, 0) scale(1);} }
-        @keyframes float2 { 0% { transform: translate3d(10px, 0, 0) scale(1); } 50% { transform: translate3d(-16px, 12px, 0) scale(1.06);} 100% { transform: translate3d(10px, 0, 0) scale(1);} }
-        @keyframes pop { 0% { transform: translateY(14px) scale(.98); opacity: 0; } 100% { transform: translateY(0px) scale(1); opacity: 1; } }
-        @keyframes logoPulse { 0% { transform: scale(1); } 50% { transform: scale(1.04); } 100% { transform: scale(1); } }
-      `}</style>
 
-      {/* background blobs */}
-      <div aria-hidden style={styles.welcomeBg}>
-        <div style={{ ...styles.blob, ...styles.blobA }} />
-        <div style={{ ...styles.blob, ...styles.blobB }} />
-      </div>
+  if (screen === "welcome") {
+    return (
+      <div style={styles.welcomePage} onClick={dismissWelcome}>
+        <style>{`
+          @keyframes float1 { 0% { transform: translate3d(-10px, 0, 0) scale(1); } 50% { transform: translate3d(12px, -14px, 0) scale(1.08);} 100% { transform: translate3d(-10px, 0, 0) scale(1);} }
+          @keyframes float2 { 0% { transform: translate3d(10px, 0, 0) scale(1); } 50% { transform: translate3d(-16px, 12px, 0) scale(1.06);} 100% { transform: translate3d(10px, 0, 0) scale(1);} }
+          @keyframes pop { 0% { transform: translateY(14px) scale(.98); opacity: 0; } 100% { transform: translateY(0px) scale(1); opacity: 1; } }
+          @keyframes logoPulse { 0% { transform: scale(1); } 50% { transform: scale(1.04); } 100% { transform: scale(1); } }
+        `}</style>
 
-      <div
-        style={{
-          ...styles.welcomeCard,
-          opacity: welcomeStage === "in" ? 1 : 0,
-          transform: welcomeStage === "in" ? "translateY(0px)" : "translateY(10px)",
-          transition: "opacity 420ms ease, transform 420ms ease",
-        }}
-      >
-        <div style={styles.welcomeLogoWrap}>
-          <div aria-hidden style={styles.logoHalo} />
-          <img src="/sga-logo.png" alt="SGA" style={styles.welcomeLogoHero} />
+        <div aria-hidden style={styles.welcomeBg}>
+          <div style={{ ...styles.blob, ...styles.blobA }} />
+          <div style={{ ...styles.blob, ...styles.blobB }} />
         </div>
 
-        <div style={styles.welcomeTitle}>{getGreeting()}</div>
-        <div style={styles.welcomeDate}>{formatDateLong()}</div>
+        <div
+          style={{
+            ...styles.welcomeCard,
+            opacity: welcomeStage === "in" ? 1 : 0,
+            transform:
+              welcomeStage === "in"
+                ? "translateY(0px) scale(1)"
+                : "translateY(-6px) scale(1.28)",
+            transition:
+              "opacity 420ms ease, transform 520ms cubic-bezier(0.2, 0.9, 0.2, 1)",
+          }}
+        >
+          <div style={styles.welcomeLogoWrap}>
+            <img src="/sga-logo.png" alt="SGA" style={styles.welcomeLogoHero} />
+          </div>
 
-        <div style={styles.welcomeTagline}>Scan fast • Track clean • Run events smoother</div>
+          <div style={styles.welcomeTitle}>{getGreeting()}</div>
+          <div style={styles.welcomeDate}>{formatDateLong()}</div>
 
-        <div style={styles.welcomeCredit}>Made with ❤️ by the Class of 2027</div>
+          <div style={styles.welcomeTagline}>
+            Scan fast • Track clean • Run events smoother
+          </div>
+
+          <div style={styles.welcomeCredit}>Made with ❤️ by the Class of 2027</div>
+        </div>
       </div>
-    </div>
-  );
-}
+    );
+  }
 
   return (
     <div style={styles.page}>
@@ -544,17 +628,41 @@ if (screen === "welcome") {
           <style>{`
             #quagga-view { position: relative; }
             #quagga-view video, #quagga-view canvas { width: 100% !important; height: 100% !important; }
-            #quagga-view canvas { position: absolute !important; top: 0; left: 0; z-index: 3; }
+            #quagga-view canvas { position: absolute !important; top: 0; left: 0; z-index: 3; pointer-events: none; }
             #quagga-view video { position: absolute !important; top: 0; left: 0; z-index: 2; object-fit: cover; }
-            #quagga-view canvas { pointer-events: none; }
           `}</style>
+
           <div style={styles.cornerHeader}>
             <div style={{ fontWeight: 900, fontSize: 13 }}>
-              Scan <span style={{ opacity: 0.75, fontWeight: 800 }}>({scannerStatus})</span>
+              Scan{" "}
+              <span style={{ opacity: 0.75, fontWeight: 800 }}>
+                ({scannerStatus})
+              </span>
             </div>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              {zoomSupported ? (
+                <div style={styles.zoomWrap} title="Zoom">
+                  <span style={{ fontWeight: 900, fontSize: 12, opacity: 0.85 }}>
+                    🔎
+                  </span>
+                  <input
+                    type="range"
+                    min={zoomCapsRef.current?.zoom?.min ?? 1}
+                    max={zoomCapsRef.current?.zoom?.max ?? 3}
+                    step={0.1}
+                    value={zoom}
+                    onChange={(e) => applyZoom(e.target.value)}
+                    style={styles.zoomRange}
+                    aria-label="Zoom"
+                  />
+                </div>
+              ) : null}
+
               <button
-                style={{ ...styles.smallBtn, opacity: videoInputs.length > 1 ? 1 : 0.45 }}
+                style={{
+                  ...styles.smallBtn,
+                  opacity: videoInputs.length > 1 ? 1 : 0.45,
+                }}
                 onClick={flipCamera}
                 title="Flip camera"
                 aria-label="Flip camera"
@@ -585,17 +693,65 @@ if (screen === "welcome") {
 
         <div style={styles.row}>
           <button
-            style={{ ...styles.chip, background: mode === "events" ? "#111827" : "transparent" }}
+            style={{
+              ...styles.chip,
+              background: mode === "events" ? "#111827" : "transparent",
+            }}
             onClick={() => setMode("events")}
           >
             Events
           </button>
           <button
-            style={{ ...styles.chip, background: mode === "distribution" ? "#111827" : "transparent" }}
+            style={{
+              ...styles.chip,
+              background: mode === "distribution" ? "#111827" : "transparent",
+            }}
             onClick={() => setMode("distribution")}
           >
             Distribution
           </button>
+        </div>
+
+        <div style={styles.pillRow}>
+          <div style={styles.pill}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+              <span style={{ fontWeight: 900 }}>
+                {mode === "events" ? "Checked in" : "Received"}
+              </span>
+              <span style={{ fontWeight: 900 }}>
+                {doneCount}/{totalCount}
+              </span>
+            </div>
+            <div style={styles.pillBarOuter}>
+              <div style={{ ...styles.pillBarInner, width: `${progressPct}%` }} />
+            </div>
+          </div>
+
+          <div style={styles.pill}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+              <span style={{ fontWeight: 900 }}>Remaining</span>
+              <span style={{ fontWeight: 900 }}>{remainingCount}</span>
+            </div>
+            <div style={{ marginTop: 6, opacity: 0.8, fontWeight: 800, fontSize: 12 }}>
+              {isOnline ? "Online" : "Offline"}
+            </div>
+          </div>
+        </div>
+
+        <div style={styles.row}>
+          <input
+            style={styles.searchInput}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search student name or ID"
+            autoCapitalize="none"
+            autoCorrect="off"
+          />
+          {query.trim() ? (
+            <button style={styles.btnSecondary} onClick={() => setQuery("")}>
+              Clear
+            </button>
+          ) : null}
         </div>
 
         <div style={styles.row}>
@@ -617,6 +773,7 @@ if (screen === "welcome") {
           <button
             style={styles.btnSecondary}
             onClick={() => {
+              refreshVideoInputs();
               setScanOpen((v) => !v);
             }}
           >
@@ -648,10 +805,12 @@ if (screen === "welcome") {
       </div>
 
       <div style={styles.list}>
-        {records.length === 0 ? (
-          <div style={styles.empty}>No records yet. Import a CSV.</div>
+        {filteredRecords.length === 0 ? (
+          <div style={styles.empty}>
+            {records.length === 0 ? "No records yet. Import a CSV." : "No matches."}
+          </div>
         ) : (
-          records
+          filteredRecords
             .slice()
             .sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""))
             .map((r) => {
@@ -669,7 +828,9 @@ if (screen === "welcome") {
                   key={r.id}
                   style={styles.rowItem}
                   onClick={() =>
-                    handleSubmit(mode === "events" ? r.studentId : r.studentId || r.name)
+                    handleSubmit(
+                      mode === "events" ? r.studentId : r.studentId || r.name
+                    )
                   }
                 >
                   <div style={{ fontWeight: 900 }}>{r.name || "(No name)"}</div>
@@ -686,13 +847,16 @@ if (screen === "welcome") {
             })
         )}
       </div>
-      <div style={{
-        marginTop: 18,
-        textAlign: "center",
-        fontSize: 12,
-        opacity: 0.6,
-        fontWeight: 700,
-      }}>
+
+      <div
+        style={{
+          marginTop: 18,
+          textAlign: "center",
+          fontSize: 12,
+          opacity: 0.6,
+          fontWeight: 700,
+        }}
+      >
         Made with ❤️ by the Class of 2027
       </div>
     </div>
@@ -701,7 +865,14 @@ if (screen === "welcome") {
 
 const styles = {
   page: {
-    welcomePage: {
+    minHeight: "100vh",
+    background: "#0f172a",
+    color: "#e5e7eb",
+    fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial",
+    padding: 14,
+  },
+
+  welcomePage: {
     minHeight: "100vh",
     padding: 14,
     color: "#e5e7eb",
@@ -749,13 +920,11 @@ const styles = {
     boxShadow: "0 18px 60px rgba(0,0,0,0.45)",
     animation: "pop 520ms ease",
   },
-  logoHalo: {
-    position: "absolute",
-    width: 140,
-    height: 140,
-    borderRadius: 999,
-    background:
-      "radial-gradient(circle at 40% 40%, rgba(34,197,94,0.35), transparent 60%)",
+  welcomeLogoWrap: {
+    display: "flex",
+    justifyContent: "center",
+    marginBottom: 12,
+    position: "relative",
   },
   welcomeLogoHero: {
     height: 92,
@@ -792,6 +961,7 @@ const styles = {
     fontWeight: 800,
     textAlign: "center",
   },
+
   top: {
     maxWidth: 760,
     margin: "0 auto",
@@ -800,24 +970,45 @@ const styles = {
     borderRadius: 16,
     border: "1px solid rgba(255,255,255,0.08)",
   },
-  card: {
-    maxWidth: 560,
-    margin: "14vh auto 0",
-    padding: 18,
-    background: "#0b1220",
-    borderRadius: 16,
-    border: "1px solid rgba(255,255,255,0.08)",
-  },
   header: { display: "flex", alignItems: "center", gap: 12, marginBottom: 6 },
   logo: { height: 44, width: 44, objectFit: "contain" },
-
-  welcomeLogoWrap: { display: "flex", justifyContent: "center", marginBottom: 12, position: "relative" },
-  welcomeLogo: { height: 86, width: 86, objectFit: "contain" },
-
   h1: { fontSize: 22, fontWeight: 900, marginBottom: 6 },
-  p: { opacity: 0.9, marginBottom: 12, lineHeight: 1.35 },
 
-  row: { display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginTop: 10 },
+  row: {
+    display: "flex",
+    gap: 10,
+    flexWrap: "wrap",
+    alignItems: "center",
+    marginTop: 10,
+  },
+
+  pillRow: {
+    display: "flex",
+    gap: 10,
+    flexWrap: "wrap",
+    marginTop: 12,
+  },
+  pill: {
+    flex: "1 1 220px",
+    padding: 12,
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,0.10)",
+    background: "rgba(17, 24, 39, 0.75)",
+  },
+  pillBarOuter: {
+    marginTop: 10,
+    height: 10,
+    borderRadius: 999,
+    background: "rgba(255,255,255,0.10)",
+    overflow: "hidden",
+  },
+  pillBarInner: {
+    height: "100%",
+    borderRadius: 999,
+    background: "#22c55e",
+    width: "0%",
+  },
+
   chip: {
     padding: "10px 12px",
     borderRadius: 999,
@@ -826,6 +1017,19 @@ const styles = {
     color: "#e5e7eb",
     fontWeight: 900,
   },
+
+  searchInput: {
+    flex: 1,
+    minWidth: 240,
+    padding: "12px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.16)",
+    background: "#0b1220",
+    color: "#e5e7eb",
+    fontWeight: 900,
+    fontSize: 15,
+  },
+
   input: {
     flex: 1,
     minWidth: 220,
@@ -837,6 +1041,7 @@ const styles = {
     fontWeight: 900,
     fontSize: 16,
   },
+
   btnPrimary: {
     padding: "12px 14px",
     borderRadius: 12,
@@ -894,20 +1099,6 @@ const styles = {
     color: "white",
   },
 
-  cornerScanner: {
-    position: "fixed",
-    right: 12,
-    bottom: 12,
-    width: 290,
-    height: 320,
-    background: "#0b1220",
-    border: "1px solid rgba(255,255,255,0.14)",
-    borderRadius: 16,
-    overflow: "hidden",
-    zIndex: 40,
-    boxShadow: "0 12px 32px rgba(0,0,0,0.35)",
-  },
-
   bigScanner: {
     position: "fixed",
     left: 12,
@@ -929,6 +1120,17 @@ const styles = {
     padding: "8px 10px",
     borderBottom: "1px solid rgba(255,255,255,0.08)",
   },
+
+  zoomWrap: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    padding: "4px 8px",
+    borderRadius: 10,
+    border: "1px solid rgba(255,255,255,0.14)",
+    background: "rgba(17,24,39,0.75)",
+  },
+  zoomRange: { width: 120 },
 
   smallBtn: {
     border: "1px solid rgba(255,255,255,0.16)",
@@ -958,7 +1160,6 @@ const styles = {
     overflow: "hidden",
   },
 
-  // subtle band hint (doesn't tell the user what to do, just helps aim)
   scanHintBand: {
     position: "absolute",
     left: "5%",
