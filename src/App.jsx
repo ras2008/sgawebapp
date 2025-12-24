@@ -472,26 +472,46 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraIndex]);
   // ---- UI ----
-  if (screen === "welcome") {
-    return (
-      <div style={styles.page} onClick={dismissWelcome}>
-        <div
-          style={{
-            ...styles.card,
-            opacity: welcomeStage === "in" ? 1 : 0,
-            transform: welcomeStage === "in" ? "translateY(0px)" : "translateY(10px)",
-            transition: "opacity 420ms ease, transform 420ms ease",
-          }}
-        >
-          <div style={styles.welcomeLogoWrap}>
-            <img src="/sga-logo.png" alt="SGA" style={styles.welcomeLogo} />
-          </div>
-          <div style={styles.h1}>{getGreeting()}</div>
-          <div style={{ ...styles.p, marginBottom: 6 }}>{formatDateLong()}</div>
-        </div>
+  // ---- UI ----
+if (screen === "welcome") {
+  return (
+    <div style={styles.welcomePage} onClick={dismissWelcome}>
+      <style>{`
+        @keyframes float1 { 0% { transform: translate3d(-10px, 0, 0) scale(1); } 50% { transform: translate3d(12px, -14px, 0) scale(1.08);} 100% { transform: translate3d(-10px, 0, 0) scale(1);} }
+        @keyframes float2 { 0% { transform: translate3d(10px, 0, 0) scale(1); } 50% { transform: translate3d(-16px, 12px, 0) scale(1.06);} 100% { transform: translate3d(10px, 0, 0) scale(1);} }
+        @keyframes pop { 0% { transform: translateY(14px) scale(.98); opacity: 0; } 100% { transform: translateY(0px) scale(1); opacity: 1; } }
+        @keyframes logoPulse { 0% { transform: scale(1); } 50% { transform: scale(1.04); } 100% { transform: scale(1); } }
+      `}</style>
+
+      {/* background blobs */}
+      <div aria-hidden style={styles.welcomeBg}>
+        <div style={{ ...styles.blob, ...styles.blobA }} />
+        <div style={{ ...styles.blob, ...styles.blobB }} />
       </div>
-    );
-  }
+
+      <div
+        style={{
+          ...styles.welcomeCard,
+          opacity: welcomeStage === "in" ? 1 : 0,
+          transform: welcomeStage === "in" ? "translateY(0px)" : "translateY(10px)",
+          transition: "opacity 420ms ease, transform 420ms ease",
+        }}
+      >
+        <div style={styles.welcomeLogoWrap}>
+          <div aria-hidden style={styles.logoHalo} />
+          <img src="/sga-logo.png" alt="SGA" style={styles.welcomeLogoHero} />
+        </div>
+
+        <div style={styles.welcomeTitle}>{getGreeting()}</div>
+        <div style={styles.welcomeDate}>{formatDateLong()}</div>
+
+        <div style={styles.welcomeTagline}>Scan fast • Track clean • Run events smoother</div>
+
+        <div style={styles.welcomeCredit}>Made with ❤️ by the Class of 2027</div>
+      </div>
+    </div>
+  );
+}
 
   return (
     <div style={styles.page}>
@@ -666,17 +686,111 @@ export default function App() {
             })
         )}
       </div>
+      <div style={{
+        marginTop: 18,
+        textAlign: "center",
+        fontSize: 12,
+        opacity: 0.6,
+        fontWeight: 700,
+      }}>
+        Made with ❤️ by the Class of 2027
+      </div>
     </div>
   );
 }
 
 const styles = {
   page: {
+    welcomePage: {
     minHeight: "100vh",
-    background: "#0f172a",
+    padding: 14,
     color: "#e5e7eb",
     fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial",
-    padding: 14,
+    background:
+      "radial-gradient(1200px 800px at 20% 10%, rgba(34,197,94,0.20), transparent 55%), radial-gradient(900px 700px at 85% 30%, rgba(59,130,246,0.22), transparent 55%), #0b1020",
+    display: "grid",
+    placeItems: "center",
+    position: "relative",
+    overflow: "hidden",
+  },
+  welcomeBg: {
+    position: "absolute",
+    inset: 0,
+    pointerEvents: "none",
+    overflow: "hidden",
+  },
+  blob: {
+    position: "absolute",
+    width: 520,
+    height: 520,
+    borderRadius: 999,
+    filter: "blur(40px)",
+    opacity: 0.7,
+  },
+  blobA: {
+    left: "-140px",
+    top: "-120px",
+    background: "rgba(34,197,94,0.22)",
+    animation: "float1 7s ease-in-out infinite",
+  },
+  blobB: {
+    right: "-180px",
+    bottom: "-180px",
+    background: "rgba(59,130,246,0.24)",
+    animation: "float2 8s ease-in-out infinite",
+  },
+  welcomeCard: {
+    width: "min(560px, 92vw)",
+    padding: 20,
+    borderRadius: 18,
+    border: "1px solid rgba(255,255,255,0.10)",
+    background: "rgba(9, 14, 28, 0.70)",
+    backdropFilter: "blur(10px)",
+    boxShadow: "0 18px 60px rgba(0,0,0,0.45)",
+    animation: "pop 520ms ease",
+  },
+  logoHalo: {
+    position: "absolute",
+    width: 140,
+    height: 140,
+    borderRadius: 999,
+    background:
+      "radial-gradient(circle at 40% 40%, rgba(34,197,94,0.35), transparent 60%)",
+  },
+  welcomeLogoHero: {
+    height: 92,
+    width: 92,
+    objectFit: "contain",
+    position: "relative",
+    animation: "logoPulse 2.4s ease-in-out infinite",
+  },
+  welcomeTitle: {
+    fontSize: 24,
+    fontWeight: 950,
+    marginTop: 10,
+    marginBottom: 6,
+    letterSpacing: "-0.02em",
+    textAlign: "center",
+  },
+  welcomeDate: {
+    opacity: 0.9,
+    marginBottom: 10,
+    fontWeight: 800,
+    textAlign: "center",
+  },
+  welcomeTagline: {
+    textAlign: "center",
+    fontSize: 13,
+    fontWeight: 800,
+    opacity: 0.78,
+    marginTop: 6,
+  },
+  welcomeCredit: {
+    marginTop: 14,
+    fontSize: 13,
+    opacity: 0.75,
+    fontWeight: 800,
+    textAlign: "center",
   },
   top: {
     maxWidth: 760,
@@ -697,7 +811,7 @@ const styles = {
   header: { display: "flex", alignItems: "center", gap: 12, marginBottom: 6 },
   logo: { height: 44, width: 44, objectFit: "contain" },
 
-  welcomeLogoWrap: { display: "flex", justifyContent: "center", marginBottom: 12 },
+  welcomeLogoWrap: { display: "flex", justifyContent: "center", marginBottom: 12, position: "relative" },
   welcomeLogo: { height: 86, width: 86, objectFit: "contain" },
 
   h1: { fontSize: 22, fontWeight: 900, marginBottom: 6 },
