@@ -53,6 +53,9 @@ export default function App() {
 
   // Scanner UI
   const [scanOpen, setScanOpen] = useState(false);
+  const [scannerStatus, setScannerStatus] = useState("idle");
+  const processedCountRef = useRef(0);
+  const lastBoxRef = useRef(0);
 
   // Cameras (for flip)
   const [videoInputs, setVideoInputs] = useState([]); // [{deviceId,label}]
@@ -238,12 +241,17 @@ export default function App() {
   }
 
   async function resetAll() {
+    const ok = window.confirm(
+      "Are you sure you want to reset? This will delete all records (including imported CSV data)."
+    );
+    if (!ok) return;
+
     await db.records.clear();
     setRecords([]);
     showBanner("Cleared all records.", "ok", 1.5);
   }
 
-  // ---- QUAGGA2 LIVE SCANNER (demo-style: locate + overlay boxes) ----
+    // ---- QUAGGA2 LIVE SCANNER (demo-style: locate + overlay boxes) ----
 
   // Best-effort: refresh cameras for flip. (Labels appear after permission.)
   async function refreshVideoInputs() {
@@ -251,7 +259,10 @@ export default function App() {
       if (!navigator.mediaDevices?.enumerateDevices) return [];
       const devices = await navigator.mediaDevices.enumerateDevices();
       const vids = devices.filter((d) => d.kind === "videoinput");
-      const list = vids.map((d) => ({ deviceId: d.deviceId, label: d.label || "Camera" }));
+      const list = vids.map((d) => ({
+        deviceId: d.deviceId,
+        label: d.label || "Camera",
+      }));
       setVideoInputs(list);
       return list;
     } catch {
@@ -273,48 +284,6 @@ export default function App() {
     }
   }
 
-  function onProcessed(result) {
-    try {
-      const ctx = Quagga.canvas?.ctx?.overlay;
-      const canvas = Quagga.canvas?.dom?.overlay;
-      if (!ctx || !canvas) return;
-
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      if (result) {
-        // many small boxes while it searches (demo behavior)
-        if (result.boxes) {
-          result.boxes
-            .filter((b) => b !== result.box)
-            .forEach((box) => {
-              Quagga.ImageDebug.drawPath(box, { x: 0, y: 1 }, ctx, {
-                color: "rgba(0,255,0,0.35)",
-                lineWidth: 2,
-              });
-            });
-        }
-
-        // best candidate
-        if (result.box) {
-          Quagga.ImageDebug.drawPath(result.box, { x: 0, y: 1 }, ctx, {
-            color: "rgba(0,255,0,0.9)",
-            lineWidth: 3,
-          });
-        }
-
-        // scan line
-        if (result.line) {
-          Quagga.ImageDebug.drawPath(result.line, { x: "x", y: "y" }, ctx, {
-            color: "rgba(255,0,0,0.9)",
-            lineWidth: 3,
-          });
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
-
   function extractStudentIdFromCode128(code) {
     const raw = String(code ?? "").trim();
 
@@ -322,14 +291,11 @@ export default function App() {
     const m7 = raw.match(/\b(\d{7})\b/);
     if (m7) return m7[1];
 
-    // Some encoders wrap the number with non-digits; pull digits and try again
+    // Pull digits only
     const digits = raw.replace(/\D/g, "");
+
     if (digits.length === 7) return digits;
-
-    // Sometimes the barcode stores 6 digits; your app expects 7 (leading 0)
     if (digits.length === 6) return "0" + digits;
-
-    // If it's longer, take the LAST 7 digits (common when prefixes are used)
     if (digits.length > 7) return digits.slice(-7);
 
     return "";
@@ -343,7 +309,6 @@ export default function App() {
     console.log("Quagga detected:", code, "=>", id);
 
     if (!id) {
-      // We decoded *something* but couldn't find a usable student ID
       showBanner("Barcode read, but ID not recognized", "bad", 1.6);
       return;
     }
@@ -354,11 +319,67 @@ export default function App() {
     if (id === last.text && now - last.t < 1500) return;
 
     lastDetectedRef.current = { text: id, t: now, streak: 0 };
-
     handleSubmit(id);
   }
 
+  function onProcessed(result) {
+  try {
+    processedCountRef.current += 1;
+    if (scannerStatus !== "running") setScannerStatus("running");
+
+    const ctx = Quagga.canvas?.ctx?.overlay;
+    const canvas = Quagga.canvas?.dom?.overlay;
+    if (!ctx || !canvas) return;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (result) {
+      if (result.boxes) {
+        result.boxes
+          .filter((b) => b !== result.box)
+          .forEach((box) => {
+            Quagga.ImageDebug.drawPath(box, { x: 0, y: 1 }, ctx, {
+              color: "rgba(0,255,0,0.35)",
+              lineWidth: 2,
+            });
+          });
+      }
+
+      if (result.box) {
+        Quagga.ImageDebug.drawPath(result.box, { x: 0, y: 1 }, ctx, {
+          color: "rgba(0,255,0,0.9)",
+          lineWidth: 3,
+        });
+
+        // show "lock" feedback occasionally (so you KNOW it's seeing the barcode)
+        const now = Date.now();
+        if (now - lastBoxRef.current > 1200) {
+          lastBoxRef.current = now;
+          showBanner("Locked on barcode…", "ok", 0.7);
+        }
+      }
+
+      if (result.line) {
+        Quagga.ImageDebug.drawPath(result.line, { x: "x", y: "y" }, ctx, {
+          color: "rgba(255,0,0,0.9)",
+          lineWidth: 3,
+        });
+      }
+
+      // SUPER IMPORTANT: if a decode exists here, force-submit it
+      if (result.codeResult?.code) {
+        console.log("codeResult in onProcessed:", result.codeResult.code);
+        onDetected({ codeResult: { code: result.codeResult.code } });
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
   function startScanner() {
+    setScannerStatus("starting");
+    showBanner("Starting camera…", "ok", 0.8);
     try {
       if (quaggaRunningRef.current) return;
 
@@ -378,16 +399,17 @@ export default function App() {
             target: targetEl,
             constraints: {
               ...constraints,
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
             },
             // Full frame hunt like the demo
             area: { top: "0%", right: "0%", left: "0%", bottom: "0%" },
           },
           locator: {
             locate: true,
-            halfSample: true,
-            patchSize: "medium",
+            // More accurate for small Code128
+            halfSample: false,
+            patchSize: "small",
           },
           decoder: {
             readers: ["code_128_reader"],
@@ -397,6 +419,7 @@ export default function App() {
         async (err) => {
           if (err) {
             console.error(err);
+            setScannerStatus("error");
             showBanner("Camera scan failed. Try reloading / HTTPS.", "bad", 2.0);
             setScanOpen(false);
             return;
@@ -405,6 +428,8 @@ export default function App() {
           Quagga.onProcessed(onProcessed);
           Quagga.onDetected(onDetected);
           Quagga.start();
+          setScannerStatus("running");
+          showBanner("Scanner ready", "ok", 0.7);
           quaggaRunningRef.current = true;
 
           // after permissions, enumerate so flip works more reliably
@@ -446,7 +471,6 @@ export default function App() {
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraIndex]);
-
   // ---- UI ----
   if (screen === "welcome") {
     return (
@@ -505,7 +529,9 @@ export default function App() {
             #quagga-view canvas { pointer-events: none; }
           `}</style>
           <div style={styles.cornerHeader}>
-            <div style={{ fontWeight: 900, fontSize: 13 }}>Scan</div>
+            <div style={{ fontWeight: 900, fontSize: 13 }}>
+              Scan <span style={{ opacity: 0.75, fontWeight: 800 }}>({scannerStatus})</span>
+            </div>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <button
                 style={{ ...styles.smallBtn, opacity: videoInputs.length > 1 ? 1 : 0.45 }}
