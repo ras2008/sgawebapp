@@ -61,6 +61,7 @@ export default function App() {
   // Scanner UI
   const [scanOpen, setScanOpen] = useState(false);
   const [scannerStatus, setScannerStatus] = useState("idle"); // idle | starting | running | error
+  const [rotation, setRotation] = useState(0); // 0 | 90 | 180 | 270
   const processedCountRef = useRef(0);
   const lastBoxRef = useRef(0);
 
@@ -328,6 +329,7 @@ export default function App() {
     } finally {
       quaggaRunningRef.current = false;
       lastDetectedRef.current = { text: "", t: 0 };
+      setRotation(0);
       setScannerStatus("idle");
     }
   }
@@ -482,6 +484,10 @@ export default function App() {
     }
   }
 
+  function rotateCamera() {
+    setRotation((r) => (r + 90) % 360);
+  }
+
   function flipCamera() {
     if (!videoInputs || videoInputs.length <= 1) return;
     stopScanner();
@@ -627,9 +633,25 @@ export default function App() {
         <div style={styles.bigScanner}>
           <style>{`
             #quagga-view { position: relative; }
-            #quagga-view video, #quagga-view canvas { width: 100% !important; height: 100% !important; }
-            #quagga-view canvas { position: absolute !important; top: 0; left: 0; z-index: 3; pointer-events: none; }
-            #quagga-view video { position: absolute !important; top: 0; left: 0; z-index: 2; object-fit: cover; }
+
+            /* Center the video/canvas so rotation stays centered */
+            #quagga-view video, #quagga-view canvas {
+              position: absolute !important;
+              top: 50% !important;
+              left: 50% !important;
+              width: 100% !important;
+              height: 100% !important;
+              transform-origin: center center !important;
+            }
+
+            #quagga-view canvas { z-index: 3; pointer-events: none; }
+            #quagga-view video { z-index: 2; object-fit: cover; }
+
+            /* Rotation classes */
+            #quagga-view.rotate-0 video,  #quagga-view.rotate-0 canvas  { transform: translate(-50%, -50%) rotate(0deg); }
+            #quagga-view.rotate-90 video, #quagga-view.rotate-90 canvas { transform: translate(-50%, -50%) rotate(90deg); }
+            #quagga-view.rotate-180 video,#quagga-view.rotate-180 canvas{ transform: translate(-50%, -50%) rotate(180deg); }
+            #quagga-view.rotate-270 video,#quagga-view.rotate-270 canvas{ transform: translate(-50%, -50%) rotate(270deg); }
           `}</style>
 
           <div style={styles.cornerHeader}>
@@ -652,6 +674,14 @@ export default function App() {
                 ↺
               </button>
               <button
+                style={styles.smallBtn}
+                onClick={rotateCamera}
+                title="Rotate"
+                aria-label="Rotate camera preview"
+              >
+                ⤾
+              </button>
+              <button
                 style={styles.xBtn}
                 onClick={() => setScanOpen(false)}
                 aria-label="Close scanner"
@@ -662,7 +692,11 @@ export default function App() {
             </div>
           </div>
 
-          <div id="quagga-view" style={styles.readerBody} />
+          <div
+            id="quagga-view"
+            className={`rotate-${rotation}`}
+            style={styles.readerBody}
+          />
           <div style={styles.scanHintBand} />
         </div>
       )}
