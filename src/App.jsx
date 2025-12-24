@@ -8,7 +8,7 @@ import { downloadCSV, parseCSV } from "./csv";
  *
  * Notes:
  * - Scanner configured for Code 39 ONLY (Quagga2: code_39_reader).
- * - Includes: search (name/ID), progress pills w/ bar + remaining, offline indicator, zoom slider (if supported).
+ * - Includes: search (name/ID), progress pills w/ bar + remaining, offline indicator.
  * - Camera does NOT auto-open on launch; user taps "Camera Scan".
  * - Data persists locally via IndexedDB (Dexie). Offline use works after first load.
  */
@@ -62,6 +62,7 @@ export default function App() {
   const [scanOpen, setScanOpen] = useState(false);
   const [scannerStatus, setScannerStatus] = useState("idle"); // idle | starting | running | error
   const [rotation, setRotation] = useState(0); // 0 | 90 | 180 | 270
+  const [rotScale, setRotScale] = useState(1);
   const processedCountRef = useRef(0);
   const lastBoxRef = useRef(0);
 
@@ -71,7 +72,6 @@ export default function App() {
 
   // Quagga lifecycle flags
   const quaggaRunningRef = useRef(false);
-
 
   // Debounce detections
   const lastDetectedRef = useRef({ text: "", t: 0 });
@@ -104,7 +104,6 @@ export default function App() {
     if (bannerTimer.current) clearTimeout(bannerTimer.current);
     bannerTimer.current = setTimeout(() => setBanner(null), seconds * 1000);
   }
-
 
   function dismissWelcome() {
     if (screen !== "welcome") return;
@@ -330,6 +329,7 @@ export default function App() {
       quaggaRunningRef.current = false;
       lastDetectedRef.current = { text: "", t: 0 };
       setRotation(0);
+      setRotScale(1);
       setScannerStatus("idle");
     }
   }
@@ -508,6 +508,30 @@ export default function App() {
   }, [scanOpen]);
 
   useEffect(() => {
+    if (!scanOpen) {
+      setRotScale(1);
+      return;
+    }
+    const el = document.querySelector("#quagga-view");
+    if (!el) return;
+
+    function compute() {
+      const rect = el.getBoundingClientRect();
+      const w = rect.width || 1;
+      const h = rect.height || 1;
+      if (rotation === 90 || rotation === 270) {
+        setRotScale(Math.max(w / h, h / w));
+      } else {
+        setRotScale(1);
+      }
+    }
+
+    compute();
+    window.addEventListener("resize", compute);
+    return () => window.removeEventListener("resize", compute);
+  }, [scanOpen, rotation]);
+
+  useEffect(() => {
     if (!scanOpen) return;
     const t = setTimeout(() => startScanner(), 80);
     return () => clearTimeout(t);
@@ -524,30 +548,15 @@ export default function App() {
           @keyframes logoPulse { 0% { transform: scale(1); } 50% { transform: scale(1.04); } 100% { transform: scale(1); } }
 
           /* Mobile welcome layout fixes */
-          #welcome-page {
-            min-height: 100dvh;
-          }
-
-          #welcome-card {
-            transform-origin: center center;
-          }
+          #welcome-page { min-height: 100dvh; }
+          #welcome-card { transform-origin: center center; }
 
           @media (max-width: 420px) {
-            #welcome-card {
-              width: 92vw !important;
-              padding: 16px !important;
-              border-radius: 16px !important;
-            }
-            #welcome-card img {
-              width: 84px !important;
-              height: 84px !important;
-            }
+            #welcome-card { width: 92vw !important; padding: 16px !important; border-radius: 16px !important; }
+            #welcome-card img { width: 84px !important; height: 84px !important; }
           }
-
           @media (max-height: 740px) {
-            #welcome-card {
-              padding: 16px !important;
-            }
+            #welcome-card { padding: 16px !important; }
           }
 
           /* iOS Safari/PWA viewport centering */
@@ -647,11 +656,11 @@ export default function App() {
             #quagga-view canvas { z-index: 3; pointer-events: none; }
             #quagga-view video { z-index: 2; object-fit: cover; }
 
-            /* Rotation classes */
-            #quagga-view.rotate-0 video,  #quagga-view.rotate-0 canvas  { transform: translate(-50%, -50%) rotate(0deg); }
-            #quagga-view.rotate-90 video, #quagga-view.rotate-90 canvas { transform: translate(-50%, -50%) rotate(90deg); }
-            #quagga-view.rotate-180 video,#quagga-view.rotate-180 canvas{ transform: translate(-50%, -50%) rotate(180deg); }
-            #quagga-view.rotate-270 video,#quagga-view.rotate-270 canvas{ transform: translate(-50%, -50%) rotate(270deg); }
+            /* Rotation classes + scale (keeps full cover on iPad when rotated) */
+            #quagga-view.rotate-0 video,  #quagga-view.rotate-0 canvas  { transform: translate(-50%, -50%) rotate(0deg) scale(var(--rot-scale, 1)); }
+            #quagga-view.rotate-90 video, #quagga-view.rotate-90 canvas { transform: translate(-50%, -50%) rotate(90deg) scale(var(--rot-scale, 1)); }
+            #quagga-view.rotate-180 video,#quagga-view.rotate-180 canvas{ transform: translate(-50%, -50%) rotate(180deg) scale(var(--rot-scale, 1)); }
+            #quagga-view.rotate-270 video,#quagga-view.rotate-270 canvas{ transform: translate(-50%, -50%) rotate(270deg) scale(var(--rot-scale, 1)); }
           `}</style>
 
           <div style={styles.cornerHeader}>
@@ -695,7 +704,7 @@ export default function App() {
           <div
             id="quagga-view"
             className={`rotate-${rotation}`}
-            style={styles.readerBody}
+            style={{ ...styles.readerBody, "--rot-scale": rotScale }}
           />
           <div style={styles.scanHintBand} />
         </div>
@@ -1139,7 +1148,6 @@ const styles = {
     padding: "8px 10px",
     borderBottom: "1px solid rgba(255,255,255,0.08)",
   },
-
 
   smallBtn: {
     border: "1px solid rgba(255,255,255,0.16)",
