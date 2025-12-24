@@ -894,7 +894,7 @@ const styles = {
     background: "#0f172a",
     color: "#e5e7eb",
     fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial",
-    padding: 14,
+    padding: 0,
   },
 
   welcomePage: {
