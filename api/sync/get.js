@@ -1,37 +1,23 @@
-import { Redis } from "@upstash/redis";
-
-const redis = Redis.fromEnv();
-
-function makeCode() {
-  return String(Math.floor(100000 + Math.random() * 900000));
-}
+import { getRedis } from "./redisClient.js";
 
 export default async function handler(req, res) {
   try {
-    if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
+    if (req.method !== "GET") return res.status(405).json({ error: "GET only" });
 
-    const payload = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
-    if (!payload || !Array.isArray(payload.records)) {
-      return res.status(400).json({ error: "Missing payload.records (must be an array)" });
-    }
+    const code = String(req.query.code || "").trim();
+    if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: "Bad code" });
 
-    let code = makeCode();
-    for (let i = 0; i < 8; i++) {
-      const exists = await redis.get(`sync:${code}`);
-      if (!exists) break;
-      code = makeCode();
-    }
+    const redis = await getRedis();
 
-    const store = {
-      ...payload,
-      mode: payload.mode || "all",
-      exportedAt: payload.exportedAt || Date.now(),
-    };
+    const key = `sync:${code}`;
+    const raw = await redis.get(key);
 
-    await redis.set(`sync:${code}`, store, { ex: 600 }); // 10 minutes
-    return res.status(200).json({ code, expiresInSec: 600 });
+    if (!raw) return res.status(404).json({ error: "Code expired or not found" });
+
+    await redis.del(key); // one-time
+    return res.status(200).json(JSON.parse(raw));
   } catch (err) {
-    console.error(err);
+    console.error("SYNC GET ERROR:", err);
     return res.status(500).json({ error: "Internal Server Error", detail: String(err?.message || err) });
   }
 }

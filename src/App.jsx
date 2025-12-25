@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Quagga from "@ericblade/quagga2";
 import { db } from "./db";
 import { downloadCSV, parseCSV } from "./csv";
@@ -8,7 +8,7 @@ import { downloadCSV, parseCSV } from "./csv";
  *
  * Notes:
  * - Scanner configured for Code 39 ONLY (Quagga2: code_39_reader).
- * - Includes: search (name/ID), progress pills w/ bar + remaining, offline indicator.
+ * - Includes: search (name/ID), progress pills w/ bar + remaining, offline indicator, zoom slider (if supported).
  * - Camera does NOT auto-open on launch; user taps "Camera Scan".
  * - Data persists locally via IndexedDB (Dexie). Offline use works after first load.
  */
@@ -58,11 +58,24 @@ export default function App() {
   const [banner, setBanner] = useState(null); // {text, type}
   const bannerTimer = useRef(null);
 
+
+  // ---- SYNC (one-time code + QR) ----
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [syncStep, setSyncStep] = useState("choose"); // choose | create | enter
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncMsg, setSyncMsg] = useState("");
+  const [syncCreatedCode, setSyncCreatedCode] = useState("");
+  const [syncEnterCode, setSyncEnterCode] = useState("");
+
+  // Optional QR scanner (for entering code)
+  const [qrScanOpen, setQrScanOpen] = useState(false);
+  const qrVideoRef = useRef(null);
+  const qrStreamRef = useRef(null);
+  const qrLoopRef = useRef(null);
+
   // Scanner UI
   const [scanOpen, setScanOpen] = useState(false);
   const [scannerStatus, setScannerStatus] = useState("idle"); // idle | starting | running | error
-  const [rotation, setRotation] = useState(0); // 0 | 90 | 180 | 270
-  const [rotScale, setRotScale] = useState(1);
   const processedCountRef = useRef(0);
   const lastBoxRef = useRef(0);
 
@@ -72,6 +85,12 @@ export default function App() {
 
   // Quagga lifecycle flags
   const quaggaRunningRef = useRef(false);
+
+  // Zoom support (best-effort)
+  const zoomTrackRef = useRef(null);
+  const zoomCapsRef = useRef(null);
+  const [zoomSupported, setZoomSupported] = useState(false);
+  const [zoom, setZoom] = useState(1);
 
   // Debounce detections
   const lastDetectedRef = useRef({ text: "", t: 0 });
@@ -105,6 +124,20 @@ export default function App() {
     bannerTimer.current = setTimeout(() => setBanner(null), seconds * 1000);
   }
 
+  function applyZoom(next) {
+    const track = zoomTrackRef.current;
+    const caps = zoomCapsRef.current;
+    if (!track || !caps?.zoom) return;
+
+    const z = Math.max(caps.zoom.min, Math.min(caps.zoom.max, Number(next)));
+    setZoom(z);
+    try {
+      track.applyConstraints({ advanced: [{ zoom: z }] });
+    } catch {
+      // ignore
+    }
+  }
+
   function dismissWelcome() {
     if (screen !== "welcome") return;
     setWelcomeStage("out");
@@ -112,6 +145,189 @@ export default function App() {
       setScreen("app");
     }, 420);
   }
+
+
+  const buildSyncPayload = useCallback(async () => {
+    // Sync EVERYTHING across modes so switching devices mid-lunch just works.
+    const all = await db.records.toArray();
+    return {
+      records: all,
+      mode: "all",
+      exportedAt: Date.now(),
+    };
+  }, []);
+
+  const applySyncPayload = useCallback(async (payload) => {
+    if (!payload || !Array.isArray(payload.records)) {
+      showBanner("Sync data invalid", "bad", 1.5);
+      return;
+    }
+    await db.records.clear();
+    await db.records.bulkAdd(payload.records);
+    await loadRecords();
+    showBanner("✅ Synced!", "ok", 1.2);
+  }, []);
+
+  const makeSyncLink = useCallback((code) => {
+    const base = typeof window !== "undefined" ? window.location.origin : "";
+    return `${base}/?sync=${encodeURIComponent(code)}`;
+  }, []);
+
+  const createSyncCode = useCallback(async () => {
+    setSyncBusy(true);
+    setSyncMsg("");
+    setSyncCreatedCode("");
+    try {
+      const payload = await buildSyncPayload();
+      const r = await fetch("/api/sync/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const txt = await r.text();
+      let data = null;
+      try {
+        data = JSON.parse(txt);
+      } catch {
+        // ignore
+      }
+      if (!r.ok) throw new Error(data?.error || txt || "Create failed");
+      setSyncCreatedCode(String(data.code || ""));
+      setSyncMsg("Code ready");
+    } catch (e) {
+      setSyncMsg(String(e?.message || e));
+    } finally {
+      setSyncBusy(false);
+    }
+  }, [buildSyncPayload]);
+
+  const redeemSyncCode = useCallback(async (code) => {
+    const c = String(code || "").trim();
+    if (!/^\d{6}$/.test(c)) {
+      setSyncMsg("Enter a 6-digit code");
+      return;
+    }
+    setSyncBusy(true);
+    setSyncMsg("");
+    try {
+      const r = await fetch(`/api/sync/get?code=${encodeURIComponent(c)}`);
+      const txt = await r.text();
+      let data = null;
+      try {
+        data = JSON.parse(txt);
+      } catch {
+        // ignore
+      }
+      if (!r.ok) throw new Error(data?.error || txt || "Sync failed");
+      await applySyncPayload(data);
+      setSyncOpen(false);
+      setSyncStep("choose");
+      setSyncEnterCode("");
+    } catch (e) {
+      setSyncMsg(String(e?.message || e));
+    } finally {
+      setSyncBusy(false);
+    }
+  }, [applySyncPayload]);
+
+  // Auto-open Enter flow for links like /?sync=123456
+  useEffect(() => {
+    try {
+      if (typeof window === "undefined") return;
+      const url = new URL(window.location.href);
+      const code = url.searchParams.get("sync");
+      if (code && /^\d{6}$/.test(code)) {
+        setSyncOpen(true);
+        setSyncStep("enter");
+        setSyncEnterCode(code);
+        url.searchParams.delete("sync");
+        window.history.replaceState({}, "", url.toString());
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // ---- QR scan (BarcodeDetector if supported) ----
+  const stopQrScan = useCallback(() => {
+    try {
+      if (qrLoopRef.current) {
+        cancelAnimationFrame(qrLoopRef.current);
+        qrLoopRef.current = null;
+      }
+      const v = qrVideoRef.current;
+      if (v) v.srcObject = null;
+      if (qrStreamRef.current) {
+        qrStreamRef.current.getTracks().forEach((t) => t.stop());
+        qrStreamRef.current = null;
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const startQrScan = useCallback(async () => {
+    setSyncMsg("");
+    if (typeof window === "undefined") return;
+    if (!("BarcodeDetector" in window)) {
+      showBanner("QR scan not supported here — paste code", "bad", 1.6);
+      return;
+    }
+    try {
+      setQrScanOpen(true);
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" },
+        audio: false,
+      });
+      qrStreamRef.current = stream;
+
+      const v = qrVideoRef.current;
+      if (v) {
+        v.srcObject = stream;
+        await v.play();
+      }
+
+      const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+
+      const loop = async () => {
+        try {
+          const vid = qrVideoRef.current;
+          if (!vid || vid.readyState < 2) {
+            qrLoopRef.current = requestAnimationFrame(loop);
+            return;
+          }
+          const codes = await detector.detect(vid);
+          if (codes && codes[0] && codes[0].rawValue) {
+            const raw = String(codes[0].rawValue || "").trim();
+            let found = raw;
+            const m = raw.match(/\bsync=(\d{6})\b/);
+            if (m) found = m[1];
+            const d = found.match(/^\d{6}$/) ? found : "";
+            if (d) {
+              setSyncEnterCode(d);
+              stopQrScan();
+              setQrScanOpen(false);
+              return;
+            }
+          }
+        } catch {
+          // ignore and continue
+        }
+        qrLoopRef.current = requestAnimationFrame(loop);
+      };
+
+      qrLoopRef.current = requestAnimationFrame(loop);
+    } catch {
+      stopQrScan();
+      setQrScanOpen(false);
+      showBanner("Could not open camera for QR scan", "bad", 1.6);
+    }
+  }, [stopQrScan]);
+
+  useEffect(() => {
+    if (!qrScanOpen) stopQrScan();
+  }, [qrScanOpen, stopQrScan]);
+
 
   // Welcome: 3 seconds then fade out (tap anywhere also dismisses)
   useEffect(() => {
@@ -328,8 +544,10 @@ export default function App() {
     } finally {
       quaggaRunningRef.current = false;
       lastDetectedRef.current = { text: "", t: 0 };
-      setRotation(0);
-      setRotScale(1);
+      zoomTrackRef.current = null;
+      zoomCapsRef.current = null;
+      setZoomSupported(false);
+      setZoom(1);
       setScannerStatus("idle");
     }
   }
@@ -441,16 +659,16 @@ export default function App() {
             target: targetEl,
             constraints: {
               ...constraints,
-              width: { ideal: 640 },
-              height: { ideal: 480 },
-              frameRate: { ideal: 30, max: 30 },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
+              frameRate: { ideal: 30, max: 60 },
             },
-            // area removed to allow full frame scanning
+            area: { top: "25%", right: "0%", left: "0%", bottom: "25%" },
           },
           locator: {
             locate: true,
             halfSample: false,
-            patchSize: "medium",
+            patchSize: "x-small",
           },
           decoder: {
             readers: ["code_39_reader"],
@@ -474,6 +692,29 @@ export default function App() {
 
           const list = await refreshVideoInputs();
           if (list?.length && cameraIndex >= list.length) setCameraIndex(0);
+
+          setTimeout(() => {
+            try {
+              const video = document.querySelector("#quagga-view video");
+              const stream = video?.srcObject;
+              const track = stream?.getVideoTracks?.()[0];
+              const caps = track?.getCapabilities?.();
+              zoomTrackRef.current = track || null;
+              zoomCapsRef.current = caps || null;
+
+              if (caps?.zoom) {
+                setZoomSupported(true);
+                const initial = Math.min(caps.zoom.max, Math.max(caps.zoom.min, 2));
+                applyZoom(initial);
+              } else {
+                setZoomSupported(false);
+                setZoom(1);
+              }
+            } catch {
+              setZoomSupported(false);
+              setZoom(1);
+            }
+          }, 250);
         }
       );
     } catch (e) {
@@ -482,10 +723,6 @@ export default function App() {
       showBanner("Camera scan failed. Try HTTPS / permissions.", "bad", 2.0);
       setScanOpen(false);
     }
-  }
-
-  function rotateCamera() {
-    setRotation((r) => (r + 90) % 360);
   }
 
   function flipCamera() {
@@ -508,30 +745,6 @@ export default function App() {
   }, [scanOpen]);
 
   useEffect(() => {
-    if (!scanOpen) {
-      setRotScale(1);
-      return;
-    }
-    const el = document.querySelector("#quagga-view");
-    if (!el) return;
-
-    function compute() {
-      const rect = el.getBoundingClientRect();
-      const w = rect.width || 1;
-      const h = rect.height || 1;
-      if (rotation === 90 || rotation === 270) {
-        setRotScale(Math.max(w / h, h / w));
-      } else {
-        setRotScale(1);
-      }
-    }
-
-    compute();
-    window.addEventListener("resize", compute);
-    return () => window.removeEventListener("resize", compute);
-  }, [scanOpen, rotation]);
-
-  useEffect(() => {
     if (!scanOpen) return;
     const t = setTimeout(() => startScanner(), 80);
     return () => clearTimeout(t);
@@ -540,41 +753,12 @@ export default function App() {
 
   if (screen === "welcome") {
     return (
-      <div id="welcome-page" style={styles.welcomePage} onClick={dismissWelcome}>
+      <div style={styles.welcomePage} onClick={dismissWelcome}>
         <style>{`
           @keyframes float1 { 0% { transform: translate3d(-10px, 0, 0) scale(1); } 50% { transform: translate3d(12px, -14px, 0) scale(1.08);} 100% { transform: translate3d(-10px, 0, 0) scale(1);} }
           @keyframes float2 { 0% { transform: translate3d(10px, 0, 0) scale(1); } 50% { transform: translate3d(-16px, 12px, 0) scale(1.06);} 100% { transform: translate3d(10px, 0, 0) scale(1);} }
           @keyframes pop { 0% { transform: translateY(14px) scale(.98); opacity: 0; } 100% { transform: translateY(0px) scale(1); opacity: 1; } }
           @keyframes logoPulse { 0% { transform: scale(1); } 50% { transform: scale(1.04); } 100% { transform: scale(1); } }
-
-          /* Mobile welcome layout fixes */
-          #welcome-page { min-height: 100dvh; }
-          #welcome-card { transform-origin: center center; }
-
-          @media (max-width: 420px) {
-            #welcome-card { width: 92vw !important; padding: 16px !important; border-radius: 16px !important; }
-            #welcome-card img { width: 84px !important; height: 84px !important; }
-          }
-          @media (max-height: 740px) {
-            #welcome-card { padding: 16px !important; }
-          }
-
-          /* iOS Safari/PWA viewport centering */
-          html, body { height: 100%; }
-          #welcome-page {
-            height: 100vh;
-            height: 100svh;
-            height: 100dvh;
-            min-height: -webkit-fill-available;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-          }
-
-          /* Slightly lift the card on tall iPhones so it feels centered */
-          @media (max-width: 430px) and (min-height: 800px) {
-            #welcome-card { margin-top: -18px !important; }
-          }
         `}</style>
 
         <div aria-hidden style={styles.welcomeBg}>
@@ -583,7 +767,6 @@ export default function App() {
         </div>
 
         <div
-          id="welcome-card"
           style={{
             ...styles.welcomeCard,
             opacity: welcomeStage === "in" ? 1 : 0,
@@ -638,29 +821,193 @@ export default function App() {
         </div>
       )}
 
+      {syncOpen && (
+        <div
+          style={styles.modalOverlay}
+          onClick={() => {
+            setSyncOpen(false);
+            setQrScanOpen(false);
+          }}
+        >
+          <div style={styles.modalCard} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeaderRow}>
+              <div style={{ fontWeight: 950, fontSize: 16 }}>Sync</div>
+              <button
+                style={styles.xBtn}
+                onClick={() => {
+                  setSyncOpen(false);
+                  setQrScanOpen(false);
+                }}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+
+            {syncStep === "choose" && (
+              <div>
+                <div style={{ opacity: 0.85, fontWeight: 800, marginBottom: 10 }}>
+                  Move your lists + progress between devices.
+                </div>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <button
+                    style={styles.btnPrimary}
+                    disabled={syncBusy}
+                    onClick={async () => {
+                      setSyncStep("create");
+                      await createSyncCode();
+                    }}
+                  >
+                    Create
+                  </button>
+                  <button
+                    style={styles.btnSecondary}
+                    disabled={syncBusy}
+                    onClick={() => {
+                      setSyncStep("enter");
+                      setSyncMsg("");
+                      setSyncCreatedCode("");
+                    }}
+                  >
+                    Enter
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {syncStep === "create" && (
+              <div>
+                <div style={styles.modalSubTitle}>Share this code</div>
+
+                <div style={styles.codeBox}>
+                  {syncCreatedCode ? syncCreatedCode : syncBusy ? "…" : "—"}
+                </div>
+
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
+                  <button
+                    style={styles.btnSecondary}
+                    disabled={syncBusy}
+                    onClick={() => createSyncCode()}
+                  >
+                    Refresh
+                  </button>
+                  <button
+                    style={styles.btnSecondary}
+                    disabled={!syncCreatedCode}
+                    onClick={async () => {
+                      try {
+                        const link = makeSyncLink(syncCreatedCode);
+                        await navigator.clipboard.writeText(link);
+                        showBanner("Link copied", "ok", 1.0);
+                      } catch {
+                        // ignore
+                      }
+                    }}
+                  >
+                    Copy Link
+                  </button>
+                </div>
+
+                {syncCreatedCode ? (
+                  <div style={{ marginTop: 14, display: "grid", placeItems: "center" }}>
+                    <img
+                      alt="Sync QR"
+                      style={styles.qrImg}
+                      src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(
+                        makeSyncLink(syncCreatedCode)
+                      )}`}
+                    />
+                  </div>
+                ) : null}
+
+                <div style={{ marginTop: 12, opacity: 0.75, fontWeight: 800, fontSize: 12 }}>
+                  Codes expire and can be used once.
+                </div>
+
+                <div style={{ marginTop: 14 }}>
+                  <button style={styles.btnSecondary} onClick={() => setSyncStep("choose")}>
+                    Back
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {syncStep === "enter" && (
+              <div>
+                <div style={styles.modalSubTitle}>Enter a code</div>
+
+                <input
+                  style={styles.codeInput}
+                  value={syncEnterCode}
+                  onChange={(e) =>
+                    setSyncEnterCode(e.target.value.replace(/\D/g, "").slice(0, 6))
+                  }
+                  placeholder="6-digit code"
+                  inputMode="numeric"
+                />
+
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
+                  <button
+                    style={styles.btnPrimary}
+                    disabled={syncBusy}
+                    onClick={() => redeemSyncCode(syncEnterCode)}
+                  >
+                    Sync
+                  </button>
+                  <button
+                    style={styles.btnSecondary}
+                    disabled={syncBusy}
+                    onClick={() => startQrScan()}
+                  >
+                    Scan
+                  </button>
+                  <button style={styles.btnSecondary} onClick={() => setSyncStep("choose")}>
+                    Back
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {syncMsg ? (
+              <div style={{ marginTop: 12, opacity: 0.9, fontWeight: 800, color: "#fca5a5" }}>
+                {syncMsg}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )}
+
+      {qrScanOpen && (
+        <div style={styles.modalOverlay}>
+          <div style={styles.qrScanCard}>
+            <div style={styles.modalHeaderRow}>
+              <div style={{ fontWeight: 950, fontSize: 16 }}>Scan QR</div>
+              <button
+                style={styles.xBtn}
+                onClick={() => setQrScanOpen(false)}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+            <video ref={qrVideoRef} style={styles.qrVideo} playsInline muted />
+            <div style={{ marginTop: 10, display: "flex", justifyContent: "flex-end" }}>
+              <button style={styles.btnSecondary} onClick={() => setQrScanOpen(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {scanOpen && (
+
         <div style={styles.bigScanner}>
           <style>{`
             #quagga-view { position: relative; }
-
-            /* Center the video/canvas so rotation stays centered */
-            #quagga-view video, #quagga-view canvas {
-              position: absolute !important;
-              top: 50% !important;
-              left: 50% !important;
-              width: 100% !important;
-              height: 100% !important;
-              transform-origin: center center !important;
-            }
-
-            #quagga-view canvas { z-index: 3; pointer-events: none; }
-            #quagga-view video { z-index: 2; object-fit: cover; }
-
-            /* Rotation classes + scale (keeps full cover on iPad when rotated) */
-            #quagga-view.rotate-0 video,  #quagga-view.rotate-0 canvas  { transform: translate(-50%, -50%) rotate(0deg) scale(var(--rot-scale, 1)); }
-            #quagga-view.rotate-90 video, #quagga-view.rotate-90 canvas { transform: translate(-50%, -50%) rotate(90deg) scale(var(--rot-scale, 1)); }
-            #quagga-view.rotate-180 video,#quagga-view.rotate-180 canvas{ transform: translate(-50%, -50%) rotate(180deg) scale(var(--rot-scale, 1)); }
-            #quagga-view.rotate-270 video,#quagga-view.rotate-270 canvas{ transform: translate(-50%, -50%) rotate(270deg) scale(var(--rot-scale, 1)); }
+            #quagga-view video, #quagga-view canvas { width: 100% !important; height: 100% !important; }
+            #quagga-view canvas { position: absolute !important; top: 0; left: 0; z-index: 3; pointer-events: none; }
+            #quagga-view video { position: absolute !important; top: 0; left: 0; z-index: 2; object-fit: cover; }
           `}</style>
 
           <div style={styles.cornerHeader}>
@@ -671,6 +1018,24 @@ export default function App() {
               </span>
             </div>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              {zoomSupported ? (
+                <div style={styles.zoomWrap} title="Zoom">
+                  <span style={{ fontWeight: 900, fontSize: 12, opacity: 0.85 }}>
+                    🔎
+                  </span>
+                  <input
+                    type="range"
+                    min={zoomCapsRef.current?.zoom?.min ?? 1}
+                    max={zoomCapsRef.current?.zoom?.max ?? 3}
+                    step={0.1}
+                    value={zoom}
+                    onChange={(e) => applyZoom(e.target.value)}
+                    style={styles.zoomRange}
+                    aria-label="Zoom"
+                  />
+                </div>
+              ) : null}
+
               <button
                 style={{
                   ...styles.smallBtn,
@@ -683,14 +1048,6 @@ export default function App() {
                 ↺
               </button>
               <button
-                style={styles.smallBtn}
-                onClick={rotateCamera}
-                title="Rotate"
-                aria-label="Rotate camera preview"
-              >
-                ⤾
-              </button>
-              <button
                 style={styles.xBtn}
                 onClick={() => setScanOpen(false)}
                 aria-label="Close scanner"
@@ -701,11 +1058,7 @@ export default function App() {
             </div>
           </div>
 
-          <div
-            id="quagga-view"
-            className={`rotate-${rotation}`}
-            style={{ ...styles.readerBody, "--rot-scale": rotScale }}
-          />
+          <div id="quagga-view" style={styles.readerBody} />
           <div style={styles.scanHintBand} />
         </div>
       )}
@@ -826,6 +1179,18 @@ export default function App() {
           <button style={styles.btnDanger} onClick={resetAll}>
             Reset
           </button>
+
+          <button
+            style={styles.btnSecondary}
+            onClick={() => {
+              setSyncOpen(true);
+              setSyncStep("choose");
+              setSyncMsg("");
+              setSyncCreatedCode("");
+            }}
+          >
+            Sync
+          </button>
         </div>
       </div>
 
@@ -890,25 +1255,22 @@ export default function App() {
 
 const styles = {
   page: {
-    minHeight: "100dvh",
+    minHeight: "100vh",
     background: "#0f172a",
     color: "#e5e7eb",
     fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial",
-    padding: 0,
+    padding: 14,
   },
 
   welcomePage: {
-    minHeight: "100dvh",
+    minHeight: "100vh",
     padding: 14,
-    paddingTop: "calc(14px + env(safe-area-inset-top))",
-    paddingBottom: "calc(14px + env(safe-area-inset-bottom))",
     color: "#e5e7eb",
     fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial",
     background:
       "radial-gradient(1200px 800px at 20% 10%, rgba(34,197,94,0.20), transparent 55%), radial-gradient(900px 700px at 85% 30%, rgba(59,130,246,0.22), transparent 55%), #0b1020",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
+    display: "grid",
+    placeItems: "center",
     position: "relative",
     overflow: "hidden",
   },
@@ -939,7 +1301,7 @@ const styles = {
     animation: "float2 8s ease-in-out infinite",
   },
   welcomeCard: {
-    width: "min(520px, 92vw)",
+    width: "min(560px, 92vw)",
     padding: 20,
     borderRadius: 18,
     border: "1px solid rgba(255,255,255,0.10)",
@@ -1149,6 +1511,17 @@ const styles = {
     borderBottom: "1px solid rgba(255,255,255,0.08)",
   },
 
+  zoomWrap: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    padding: "4px 8px",
+    borderRadius: 10,
+    border: "1px solid rgba(255,255,255,0.14)",
+    background: "rgba(17,24,39,0.75)",
+  },
+  zoomRange: { width: 120 },
+
   smallBtn: {
     border: "1px solid rgba(255,255,255,0.16)",
     background: "#111827",
@@ -1186,4 +1559,85 @@ const styles = {
     background: "rgba(255,255,255,0.10)",
     pointerEvents: "none",
   },
+  modalOverlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.55)",
+    zIndex: 60,
+    display: "grid",
+    placeItems: "center",
+    padding: 16,
+  },
+  modalCard: {
+    width: "min(520px, 92vw)",
+    borderRadius: 16,
+    border: "1px solid rgba(255,255,255,0.14)",
+    background: "#0b1220",
+    color: "#e5e7eb",
+    padding: 14,
+    boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+  },
+  modalHeaderRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    paddingBottom: 10,
+    borderBottom: "1px solid rgba(255,255,255,0.08)",
+    marginBottom: 12,
+  },
+  modalSubTitle: {
+    fontWeight: 900,
+    opacity: 0.9,
+    marginBottom: 10,
+  },
+  codeBox: {
+    width: "100%",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,0.16)",
+    background: "#111827",
+    padding: "14px 16px",
+    fontSize: 34,
+    fontWeight: 950,
+    letterSpacing: "0.12em",
+    textAlign: "center",
+  },
+  codeInput: {
+    width: "100%",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,0.16)",
+    background: "#111827",
+    padding: "14px 16px",
+    fontSize: 20,
+    fontWeight: 950,
+    letterSpacing: "0.10em",
+    color: "#e5e7eb",
+    textAlign: "center",
+  },
+  qrImg: {
+    width: 200,
+    height: 200,
+    borderRadius: 14,
+    background: "white",
+    padding: 8,
+  },
+  qrScanCard: {
+    width: "min(520px, 92vw)",
+    borderRadius: 16,
+    border: "1px solid rgba(255,255,255,0.14)",
+    background: "#0b1220",
+    color: "#e5e7eb",
+    padding: 14,
+    boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+  },
+  qrVideo: {
+    width: "100%",
+    height: "50vh",
+    maxHeight: 420,
+    borderRadius: 14,
+    background: "black",
+    objectFit: "cover",
+    border: "1px solid rgba(255,255,255,0.10)",
+  }
+
 };

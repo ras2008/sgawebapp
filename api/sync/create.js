@@ -1,6 +1,4 @@
-import { Redis } from "@upstash/redis";
-
-const redis = Redis.fromEnv();
+import { getRedis } from "./redisClient.js";
 
 function makeCode() {
   return String(Math.floor(100000 + Math.random() * 900000));
@@ -15,6 +13,8 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing payload.records (must be an array)" });
     }
 
+    const redis = await getRedis();
+
     let code = makeCode();
     for (let i = 0; i < 8; i++) {
       const exists = await redis.get(`sync:${code}`);
@@ -22,16 +22,18 @@ export default async function handler(req, res) {
       code = makeCode();
     }
 
-    const store = {
+    const store = JSON.stringify({
       ...payload,
       mode: payload.mode || "all",
       exportedAt: payload.exportedAt || Date.now(),
-    };
+    });
 
-    await redis.set(`sync:${code}`, store, { ex: 600 }); // 10 minutes
+    // set + expire in 10 minutes
+    await redis.set(`sync:${code}`, store, { EX: 600 });
+
     return res.status(200).json({ code, expiresInSec: 600 });
   } catch (err) {
-    console.error(err);
+    console.error("SYNC CREATE ERROR:", err);
     return res.status(500).json({ error: "Internal Server Error", detail: String(err?.message || err) });
   }
 }
