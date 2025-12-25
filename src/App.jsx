@@ -361,20 +361,35 @@ export default function App() {
     }
   }
 
-  function exportTemplateEvents() {
-    downloadCSV(
-      "events-template.csv",
-      [],
-      ["ID", "Name"]
-    );
-  }
-
-  function exportTemplateDistribution() {
-    downloadCSV(
-      "distribution-template.csv",
-      [],
-      ["ID", "Name", "Type"]
-    );
+  function exportTemplate() {
+    if (mode === "events") {
+      downloadCSV(
+        "events-template.csv",
+        [
+          {
+            ID: "",
+            Name: "",
+            Scanned: "No",
+            Timestamp: "",
+          },
+        ],
+        ["ID", "Name", "Scanned", "Timestamp"]
+      );
+    } else {
+      downloadCSV(
+        "distribution-template.csv",
+        [
+          {
+            ID: "",
+            Name: "",
+            Type: "",
+            Received: "No",
+            Timestamp: "",
+          },
+        ],
+        ["ID", "Name", "Type", "Received", "Timestamp"]
+      );
+    }
   }
 
   async function handleSubmit(raw) {
@@ -1071,12 +1086,8 @@ export default function App() {
             Export CSV
           </button>
 
-          <button style={styles.btnSecondary} onClick={exportTemplateEvents}>
-            Events Template
-          </button>
-
-          <button style={styles.btnSecondary} onClick={exportTemplateDistribution}>
-            Dist Template
+          <button style={styles.btnSecondary} onClick={exportTemplate}>
+            Template
           </button>
 
           <button
