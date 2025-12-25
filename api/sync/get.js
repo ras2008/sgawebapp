@@ -1,14 +1,37 @@
-import { kv } from "@vercel/kv";
+import { Redis } from "@upstash/redis";
+
+const redis = Redis.fromEnv();
+
+function makeCode() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
 
 export default async function handler(req, res) {
-  const code = String(req.query.code || "").trim();
-  if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: "Bad code" });
+  try {
+    if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
 
-  const key = `sync:${code}`;
-  const payload = await kv.get(key);
+    const payload = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+    if (!payload || !Array.isArray(payload.records)) {
+      return res.status(400).json({ error: "Missing payload.records (must be an array)" });
+    }
 
-  if (!payload) return res.status(404).json({ error: "Code expired or not found" });
+    let code = makeCode();
+    for (let i = 0; i < 8; i++) {
+      const exists = await redis.get(`sync:${code}`);
+      if (!exists) break;
+      code = makeCode();
+    }
 
-  await kv.del(key); // one-time use
-  res.json(payload);
+    const store = {
+      ...payload,
+      mode: payload.mode || "all",
+      exportedAt: payload.exportedAt || Date.now(),
+    };
+
+    await redis.set(`sync:${code}`, store, { ex: 600 }); // 10 minutes
+    return res.status(200).json({ code, expiresInSec: 600 });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Internal Server Error", detail: String(err?.message || err) });
+  }
 }

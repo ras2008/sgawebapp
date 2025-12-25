@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@ericblade/quagga2": "^1.12.1",
+    "@upstash/redis": "^1.35.8",
     "@vercel/kv": "^3.0.0",
     "dexie": "^3.2.4",
     "html5-qrcode": "^2.3.8",
