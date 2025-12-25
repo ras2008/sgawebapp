@@ -360,6 +360,22 @@ export default function App() {
     }
   }
 
+  function exportTemplateEvents() {
+    downloadCSV(
+      "events-template.csv",
+      [],
+      ["ID", "Name"]
+    );
+  }
+
+  function exportTemplateDistribution() {
+    downloadCSV(
+      "distribution-template.csv",
+      [],
+      ["ID", "Name", "Type"]
+    );
+  }
+
   async function handleSubmit(raw) {
     const value = String(raw ?? "").trim();
     if (!value) return;
@@ -1049,8 +1065,12 @@ export default function App() {
             Export CSV
           </button>
 
-          <button style={styles.btnDanger} onClick={resetAll}>
-            Reset
+          <button style={styles.btnSecondary} onClick={exportTemplateEvents}>
+            Events Template
+          </button>
+
+          <button style={styles.btnSecondary} onClick={exportTemplateDistribution}>
+            Dist Template
           </button>
 
           <button
@@ -1063,6 +1083,10 @@ export default function App() {
             }}
           >
             Sync
+          </button>
+
+          <button style={styles.btnDanger} onClick={resetAll}>
+            Reset
           </button>
         </div>
       </div>
@@ -1174,7 +1198,8 @@ const styles = {
     animation: "float2 8s ease-in-out infinite",
   },
   welcomeCard: {
-    width: "min(560px, 92vw)",
+    width: "min(560px, calc(100vw - 28px))",
+    boxSizing: "border-box",
     padding: 20,
     borderRadius: 18,
     border: "1px solid rgba(255,255,255,0.10)",
@@ -1312,6 +1337,12 @@ const styles = {
     background: "#22c55e",
     color: "white",
     fontWeight: 900,
+    fontSize: 14,
+    lineHeight: 1,
+    minHeight: 44,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
   },
   btnSecondary: {
     padding: "12px 14px",
@@ -1320,6 +1351,12 @@ const styles = {
     background: "#111827",
     color: "#e5e7eb",
     fontWeight: 900,
+    fontSize: 14,
+    lineHeight: 1,
+    minHeight: 44,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
   },
   btnDanger: {
     padding: "12px 14px",
@@ -1328,6 +1365,12 @@ const styles = {
     background: "#ef4444",
     color: "white",
     fontWeight: 900,
+    fontSize: 14,
+    lineHeight: 1,
+    minHeight: 44,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
   },
   fileBtn: {
     padding: "12px 14px",
@@ -1336,6 +1379,13 @@ const styles = {
     background: "#111827",
     color: "#e5e7eb",
     fontWeight: 900,
+    fontSize: 14,
+    lineHeight: 1,
+    minHeight: 44,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
     cursor: "pointer",
   },
 
