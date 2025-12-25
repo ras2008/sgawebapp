@@ -67,11 +67,6 @@ export default function App() {
   const [syncCreatedCode, setSyncCreatedCode] = useState("");
   const [syncEnterCode, setSyncEnterCode] = useState("");
 
-  // Optional QR scanner (for entering code)
-  const [qrScanOpen, setQrScanOpen] = useState(false);
-  const qrVideoRef = useRef(null);
-  const qrStreamRef = useRef(null);
-  const qrLoopRef = useRef(null);
 
   // Scanner UI
   const [scanOpen, setScanOpen] = useState(false);
@@ -248,85 +243,6 @@ export default function App() {
     }
   }, []);
 
-  // ---- QR scan (BarcodeDetector if supported) ----
-  const stopQrScan = useCallback(() => {
-    try {
-      if (qrLoopRef.current) {
-        cancelAnimationFrame(qrLoopRef.current);
-        qrLoopRef.current = null;
-      }
-      const v = qrVideoRef.current;
-      if (v) v.srcObject = null;
-      if (qrStreamRef.current) {
-        qrStreamRef.current.getTracks().forEach((t) => t.stop());
-        qrStreamRef.current = null;
-      }
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  const startQrScan = useCallback(async () => {
-    setSyncMsg("");
-    if (typeof window === "undefined") return;
-    if (!("BarcodeDetector" in window)) {
-      showBanner("QR scan not supported here — paste code", "bad", 1.6);
-      return;
-    }
-    try {
-      setQrScanOpen(true);
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" },
-        audio: false,
-      });
-      qrStreamRef.current = stream;
-
-      const v = qrVideoRef.current;
-      if (v) {
-        v.srcObject = stream;
-        await v.play();
-      }
-
-      const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
-
-      const loop = async () => {
-        try {
-          const vid = qrVideoRef.current;
-          if (!vid || vid.readyState < 2) {
-            qrLoopRef.current = requestAnimationFrame(loop);
-            return;
-          }
-          const codes = await detector.detect(vid);
-          if (codes && codes[0] && codes[0].rawValue) {
-            const raw = String(codes[0].rawValue || "").trim();
-            let found = raw;
-            const m = raw.match(/\bsync=(\d{6})\b/);
-            if (m) found = m[1];
-            const d = found.match(/^\d{6}$/) ? found : "";
-            if (d) {
-              setSyncEnterCode(d);
-              stopQrScan();
-              setQrScanOpen(false);
-              return;
-            }
-          }
-        } catch {
-          // ignore and continue
-        }
-        qrLoopRef.current = requestAnimationFrame(loop);
-      };
-
-      qrLoopRef.current = requestAnimationFrame(loop);
-    } catch {
-      stopQrScan();
-      setQrScanOpen(false);
-      showBanner("Could not open camera for QR scan", "bad", 1.6);
-    }
-  }, [stopQrScan]);
-
-  useEffect(() => {
-    if (!qrScanOpen) stopQrScan();
-  }, [qrScanOpen, stopQrScan]);
 
 
   // Welcome: 3 seconds then fade out (tap anywhere also dismisses)
@@ -826,7 +742,6 @@ export default function App() {
           style={styles.modalOverlay}
           onClick={() => {
             setSyncOpen(false);
-            setQrScanOpen(false);
           }}
         >
           <div style={styles.modalCard} onClick={(e) => e.stopPropagation()}>
@@ -836,7 +751,6 @@ export default function App() {
                 style={styles.xBtn}
                 onClick={() => {
                   setSyncOpen(false);
-                  setQrScanOpen(false);
                 }}
                 aria-label="Close"
               >
@@ -908,18 +822,6 @@ export default function App() {
                   </button>
                 </div>
 
-                {syncCreatedCode ? (
-                  <div style={{ marginTop: 14, display: "grid", placeItems: "center" }}>
-                    <img
-                      alt="Sync QR"
-                      style={styles.qrImg}
-                      src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(
-                        makeSyncLink(syncCreatedCode)
-                      )}`}
-                    />
-                  </div>
-                ) : null}
-
                 <div style={{ marginTop: 12, opacity: 0.75, fontWeight: 800, fontSize: 12 }}>
                   Codes expire and can be used once.
                 </div>
@@ -954,13 +856,6 @@ export default function App() {
                   >
                     Sync
                   </button>
-                  <button
-                    style={styles.btnSecondary}
-                    disabled={syncBusy}
-                    onClick={() => startQrScan()}
-                  >
-                    Scan
-                  </button>
                   <button style={styles.btnSecondary} onClick={() => setSyncStep("choose")}>
                     Back
                   </button>
@@ -977,28 +872,6 @@ export default function App() {
         </div>
       )}
 
-      {qrScanOpen && (
-        <div style={styles.modalOverlay}>
-          <div style={styles.qrScanCard}>
-            <div style={styles.modalHeaderRow}>
-              <div style={{ fontWeight: 950, fontSize: 16 }}>Scan QR</div>
-              <button
-                style={styles.xBtn}
-                onClick={() => setQrScanOpen(false)}
-                aria-label="Close"
-              >
-                ✕
-              </button>
-            </div>
-            <video ref={qrVideoRef} style={styles.qrVideo} playsInline muted />
-            <div style={{ marginTop: 10, display: "flex", justifyContent: "flex-end" }}>
-              <button style={styles.btnSecondary} onClick={() => setQrScanOpen(false)}>
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {scanOpen && (
 
@@ -1569,7 +1442,10 @@ const styles = {
     padding: 16,
   },
   modalCard: {
-    width: "min(520px, 92vw)",
+    boxSizing: "border-box",
+    width: "min(520px, 94vw)",
+    maxHeight: "85vh",
+    overflowY: "auto",
     borderRadius: 16,
     border: "1px solid rgba(255,255,255,0.14)",
     background: "#0b1220",
@@ -1592,17 +1468,19 @@ const styles = {
     marginBottom: 10,
   },
   codeBox: {
+    boxSizing: "border-box",
     width: "100%",
-    borderRadius: 14,
+    borderRadius: 12,
     border: "1px solid rgba(255,255,255,0.16)",
-    background: "#111827",
+    background: "rgba(17,24,39,0.65)",
     padding: "14px 16px",
-    fontSize: 34,
+    fontSize: 30,
     fontWeight: 950,
-    letterSpacing: "0.12em",
+    letterSpacing: "0.08em",
     textAlign: "center",
   },
   codeInput: {
+    boxSizing: "border-box",
     width: "100%",
     borderRadius: 14,
     border: "1px solid rgba(255,255,255,0.16)",
@@ -1614,30 +1492,5 @@ const styles = {
     color: "#e5e7eb",
     textAlign: "center",
   },
-  qrImg: {
-    width: 200,
-    height: 200,
-    borderRadius: 14,
-    background: "white",
-    padding: 8,
-  },
-  qrScanCard: {
-    width: "min(520px, 92vw)",
-    borderRadius: 16,
-    border: "1px solid rgba(255,255,255,0.14)",
-    background: "#0b1220",
-    color: "#e5e7eb",
-    padding: 14,
-    boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
-  },
-  qrVideo: {
-    width: "100%",
-    height: "50vh",
-    maxHeight: 420,
-    borderRadius: 14,
-    background: "black",
-    objectFit: "cover",
-    border: "1px solid rgba(255,255,255,0.10)",
-  }
 
 };
