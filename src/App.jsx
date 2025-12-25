@@ -57,6 +57,7 @@ export default function App() {
 
   const [banner, setBanner] = useState(null); // {text, type}
   const bannerTimer = useRef(null);
+  const importInputRef = useRef(null);
 
 
   // ---- SYNC (one-time code + QR) ----
@@ -120,7 +121,6 @@ export default function App() {
     setBanner({ text, type });
     if (bannerTimer.current) clearTimeout(bannerTimer.current);
     bannerTimer.current = setTimeout(() => setBanner(null), seconds * 1000);
-  }
   }
 
   function dismissWelcome() {
@@ -1181,22 +1181,31 @@ export default function App() {
             {scanOpen ? "Hide Camera" : "Camera Scan"}
           </button>
 
-          <label style={styles.fileBtn}>
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".csv"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) importCSV(f);
+              e.target.value = "";
+            }}
+          />
+
+          <button
+            style={styles.btnSecondary}
+            onClick={() => importInputRef.current?.click()}
+          >
             Import CSV
-            <input
-              type="file"
-              accept=".csv"
-              hidden
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) importCSV(f);
-                e.target.value = "";
-              }}
-            />
-          </label>
+          </button>
 
           <button style={styles.btnSecondary} onClick={exportCSV}>
             Export CSV
+          </button>
+          
+          <button style={styles.btnSecondary} onClick={exportTemplate}>
+             Template
           </button>
 
           <button style={styles.btnDanger} onClick={resetAll}>
